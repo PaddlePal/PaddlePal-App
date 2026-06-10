@@ -13,6 +13,7 @@ import {
 import * as SplashScreen from 'expo-splash-screen';
 
 import { useAuth } from '@/hooks/useAuth';
+import { BluetoothProvider } from '@/hooks/useBluetooth';
 import { Colors } from '@/constants/colors';
 
 // Keep splash visible while fonts + auth load
@@ -76,10 +77,10 @@ export default function RootLayout() {
   }
 
   return (
-    <>
+    <BluetoothProvider>
       <StatusBar style="light" />
       <Slot />
-    </>
+    </BluetoothProvider>
   );
 }
 

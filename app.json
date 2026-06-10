@@ -41,6 +41,16 @@
             "useFrameworks": "static"
           }
         }
+      ],
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": [
+            "central"
+          ],
+          "bluetoothAlwaysPermission": "Allow PaddlePal Connect to connect to your smart pickleball paddle."
+        }
       ]
     ],
     "experiments": {
