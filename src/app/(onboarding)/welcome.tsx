@@ -8,9 +8,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { signOut } from '@react-native-firebase/auth';
 import { doc, setDoc } from '@react-native-firebase/firestore';
-import { auth, firestore } from '@/lib/firebase';
+import { firestore } from '@/lib/firebase';
 import { useAuth } from '@/hooks/useAuth';
 import { Colors } from '@/constants/colors';
 import { Typography } from '@/constants/typography';
@@ -21,20 +20,18 @@ export default function WelcomeScreen() {
   const [loading, setLoading] = useState(false);
 
   /**
-   * Dev-only: mark onboarded → true, then sign out to validate
-   * the Auth Gate bounces the user back to sign-in.
+   * Complete onboarding by marking user onboarded → true.
+   * The real-time auth listener will automatically redirect the user to the dashboard.
    */
-  const handleSkip = async () => {
+  const handleGetStarted = async () => {
     if (!user) return;
 
     setLoading(true);
     try {
       const userRef = doc(firestore, 'users', user.uid);
       await setDoc(userRef, { onboarded: true }, { merge: true });
-
-      await signOut(auth);
-    } catch {
-      // Auth Gate will handle navigation
+    } catch (err) {
+      console.error('[WelcomeScreen] Error completing onboarding:', err);
     } finally {
       setLoading(false);
     }
@@ -68,17 +65,17 @@ export default function WelcomeScreen() {
       <View style={styles.actions}>
         <Pressable
           style={({ pressed }) => [
-            styles.skipButton,
+            styles.getStartedButton,
             pressed && styles.buttonPressed,
             loading && styles.buttonDisabled,
           ]}
-          onPress={handleSkip}
+          onPress={handleGetStarted}
           disabled={loading}
         >
           {loading ? (
             <ActivityIndicator color={Colors.onPrimary} />
           ) : (
-            <Text style={styles.skipButtonText}>Skip for now (Dev)</Text>
+            <Text style={styles.getStartedButtonText}>Get Started</Text>
           )}
         </Pressable>
       </View>
@@ -147,7 +144,7 @@ const styles = StyleSheet.create({
   actions: {
     paddingBottom: Spacing.xl,
   },
-  skipButton: {
+  getStartedButton: {
     backgroundColor: Colors.primary,
     borderRadius: Radius.lg,
     paddingVertical: 16,
@@ -160,7 +157,7 @@ const styles = StyleSheet.create({
   buttonDisabled: {
     opacity: 0.6,
   },
-  skipButtonText: {
+  getStartedButtonText: {
     ...Typography.bodyLg,
     color: Colors.onPrimary,
     fontFamily: 'PlusJakartaSans_700Bold',
