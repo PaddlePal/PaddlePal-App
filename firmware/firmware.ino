@@ -46,6 +46,13 @@ BLEService paddleService(PADDLE_SERVICE_UUID);
 // this pass.
 BLEStringCharacteristic paddleInfo("9590ad2e-fd81-4688-9d3b-65ac36caca3a",
                                    BLERead, 32);
+// Live FSR hit stream: a 4-byte notify carrying the raw inter-core FIFO word
+// (zone in upper 16 bits, FSR payload in lower 16 — see sendFSRPacket()). Sent
+// little-endian on the wire (RP2040). Decoded by the app in
+// src/hooks/usePaddleData.ts with identical unpacking. UUID sequence:
+// ...2d = service, ...2e = paddleInfo, ...2f = fsrData.
+BLECharacteristic fsrData("9590ad2f-fd81-4688-9d3b-65ac36caca3a",
+                          BLERead | BLENotify, 4);
 
 // Helper function to pack data and send to Core 0 via FIFO
 // Zone number goes into upper 16 bits, FSR value goes into lower 16 bits
@@ -157,6 +164,7 @@ void setup() {
 
   BLE.setDeviceName(PADDLE_BLE_NAME);
   paddleService.addCharacteristic(paddleInfo);
+  paddleService.addCharacteristic(fsrData);
   paddleInfo.writeValue(PADDLE_BLE_NAME);
   BLE.addService(paddleService);
 
@@ -251,6 +259,14 @@ void loop() {
     // Process and print all pending FSR hits collected in the queue
     while (multicore_fifo_rvalid()) {
       uint32_t packedData = multicore_fifo_pop_blocking();
+
+      // Mirror the raw FIFO word out over BLE as a 4-byte notify, in addition
+      // to the Serial print below. These are the exact bytes Core 1 packed via
+      // sendFSRPacket() (zone in upper 16 bits, payload in lower 16) — no
+      // re-encoding. writeValue() both stores and notifies any subscribed
+      // central; it's a no-op on the air when nothing is subscribed. Serial
+      // output below is unchanged, preserving the byte-for-byte discipline.
+      fsrData.writeValue((uint8_t *)&packedData, 4);
 
       // Unpack variables back out from the single 32-bit integer
       int zoneNum = packedData >> 16;
