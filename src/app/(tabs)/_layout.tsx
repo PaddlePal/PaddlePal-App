@@ -21,6 +21,13 @@ export default function TabsLayout() {
           tabBarLabel: 'Home',
         }}
       />
+      <Tabs.Screen
+        name="live"
+        options={{
+          title: 'Live',
+          tabBarLabel: 'Live',
+        }}
+      />
     </Tabs>
   );
 }
