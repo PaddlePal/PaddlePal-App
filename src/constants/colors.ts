@@ -5,11 +5,11 @@
  * for the PaddlePal brand palette.
  */
 export const Colors = {
-  // ── Primary: Electric Lime ────────────────────────────────
-  primary: '#DFFF00',
-  primaryContainer: '#D2F000',
-  onPrimary: '#2C3400',
-  onPrimaryContainer: '#5D6B00',
+  // ── Primary: Spring Green ─────────────────────────────────
+  primary: '#4ADE80',
+  primaryContainer: '#22C55E',
+  onPrimary: '#04310F',
+  onPrimaryContainer: '#065F35',
 
   // ── Secondary: Action Blue ────────────────────────────────
   secondary: '#ADC6FF',
@@ -48,18 +48,18 @@ export const Colors = {
   error: '#FFB4AB',
   errorContainer: '#93000A',
   onError: '#690005',
-  success: '#DFFF00',          // Reuse primary for positive states
+  success: '#4ADE80',          // Reuse primary for positive states
 
   // ── Utility ───────────────────────────────────────────────
   muted: '#909378',
   card: '#171F33',             // Alias for surfaceContainer
   inputBackground: '#0B1326',
   inputBorder: '#454932',
-  inputBorderFocus: '#DFFF00',
+  inputBorderFocus: '#4ADE80',
 
   // ── Gradient endpoints ────────────────────────────────────
   gradientStart: '#00F5FF',    // Cyan baseline
-  gradientEnd: '#DFFF00',      // Electric Lime peak
+  gradientEnd: '#4ADE80',      // Spring Green peak
 
   // ── Glass effects ─────────────────────────────────────────
   glassBackground: 'rgba(15, 23, 42, 0.6)',
