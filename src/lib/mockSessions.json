@@ -1,0 +1,21 @@
+[
+  {
+    "id": "sess_demo_001",
+    "userId": "demo-user",
+    "status": "complete",
+    "startedAt": "2026-07-07T14:30:00",
+    "endedAt": "2026-07-07T15:12:00",
+    "durationSec": 2520,
+    "metrics": {
+      "totalShots": 148,
+      "avgPower": "high",
+      "zones": [
+        { "zone": 1, "shots": 52 },
+        { "zone": 2, "shots": 21 },
+        { "zone": 3, "shots": 28 },
+        { "zone": 4, "shots": 33 },
+        { "zone": 5, "shots": 14 }
+      ]
+    }
+  }
+]
