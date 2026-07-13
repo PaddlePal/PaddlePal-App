@@ -19,6 +19,18 @@ export interface ZoneStat {
   shots: number;
 }
 
+/**
+ * A single buffered FSR hit, recorded client-side during an active session and
+ * flushed to Firestore in one write when the session ends (`sessions.rawHits`).
+ */
+export interface RawHit {
+  zone: ZoneId;
+  /** Raw FSR value from the BLE packet (0–1023 for zones 1–4). */
+  payload: number;
+  /** Hit timestamp minus session start timestamp, in ms (client clock). */
+  offsetMs: number;
+}
+
 /** Backend-computed session metrics (empty until processing completes). */
 export interface SessionMetrics {
   totalShots: number;

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Platform } from 'react-native';
+import { Buffer } from 'buffer';
 import { BleManager, Device, State as BleState, BleError } from 'react-native-ble-plx';
 
 // ── Paddle filter config ─────────────────────────────────────────
@@ -13,6 +14,16 @@ const PADDLE_FILTER = {
   /** Expected BLE advertised service UUID (matches firmware.ino PADDLE_SERVICE_UUID) */
   serviceUUID: '9590ad2d-fd81-4688-9d3b-65ac36caca3a' as string | null,
 };
+
+// ── Session-control characteristic (forward declaration) ─────────
+// Reserved as the next UUID in the firmware's service/info/fsrData sequence
+// (…2d service, …2e info, …2f fsrData → …30 session control). NOT present in
+// firmware yet — this is the app-side half of a future shared BLE control
+// characteristic (Write + Notify, 1 byte). Whichever side changes it first
+// (app write, or a future paddle-handle button) is authoritative; the other
+// reacts to the notify. See memory-bank/progress.md (2026-07-13, T6).
+const PADDLE_SERVICE_UUID = '9590ad2d-fd81-4688-9d3b-65ac36caca3a';
+const SESSION_CONTROL_CHAR_UUID = '9590ad30-fd81-4688-9d3b-65ac36caca3a';
 
 // ── Types ────────────────────────────────────────────────────────
 interface DiscoveredDevice {
@@ -42,6 +53,12 @@ interface BluetoothContextValue {
   connectToDevice: (device: DiscoveredDevice) => Promise<void>;
   /** Disconnect from the current device */
   disconnect: () => Promise<void>;
+  /**
+   * Best-effort write of session-active state to the paddle's session-control
+   * characteristic. No-ops silently when the characteristic isn't present on
+   * the connected peripheral (today's firmware) — never throws.
+   */
+  writeSessionState: (active: boolean) => Promise<void>;
   /** Human-readable error message, if any */
   error: string | null;
 }
@@ -279,6 +296,29 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
     }
   }, [connectedDevice]);
 
+  // ── Session control (forward-declared characteristic) ────────
+
+  const writeSessionState = useCallback(
+    async (active: boolean): Promise<void> => {
+      const device = connectedDevice?.raw;
+      if (!device) return;
+      try {
+        const payload = Buffer.from([active ? 1 : 0]).toString('base64');
+        await device.writeCharacteristicWithResponseForService(
+          PADDLE_SERVICE_UUID,
+          SESSION_CONTROL_CHAR_UUID,
+          payload,
+        );
+      } catch {
+        // The session-control characteristic doesn't exist on today's firmware
+        // (forward declaration only). This MUST fail silent — never interrupt
+        // the working session flow. Real write/notify + a de-dup guard for the
+        // future hardware button lands when the firmware side is picked up.
+      }
+    },
+    [connectedDevice],
+  );
+
   // ── Context value ────────────────────────────────────────────
 
   const value = useMemo<BluetoothContextValue>(
@@ -291,9 +331,10 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
       stopScan,
       connectToDevice,
       disconnect,
+      writeSessionState,
       error,
     }),
-    [adapterState, isScanning, devices, connectedDevice, startScan, stopScan, connectToDevice, disconnect, error],
+    [adapterState, isScanning, devices, connectedDevice, startScan, stopScan, connectToDevice, disconnect, writeSessionState, error],
   );
 
   return (

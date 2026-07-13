@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -8,14 +8,15 @@ import {
   Text,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { State as BleState } from 'react-native-ble-plx';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { useAuth } from '@/hooks/useAuth';
-import { useBluetooth, isConnectedToPaddle } from '@/hooks/useBluetooth';
 import { Colors } from '@/constants/colors';
+import { Radius, Spacing } from '@/constants/spacing';
 import { Typography } from '@/constants/typography';
-import { Spacing, Radius } from '@/constants/spacing';
+import { useAuth } from '@/hooks/useAuth';
+import { isConnectedToPaddle, useBluetooth } from '@/hooks/useBluetooth';
+import { useSession } from '@/hooks/useSession';
 
 // ── Helpers ────────────────────────────────────────────────────────
 function rssiToSignalBars(rssi: number | null): number {
@@ -24,6 +25,16 @@ function rssiToSignalBars(rssi: number | null): number {
   if (rssi >= -65) return 3;
   if (rssi >= -80) return 2;
   return 1;
+}
+
+/** Elapsed session time as m:ss (or h:mm:ss past an hour). */
+function formatElapsed(totalSec: number): string {
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const ss = String(s).padStart(2, '0');
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${ss}`;
+  return `${m}:${ss}`;
 }
 
 function rssiLabel(rssi: number | null): string {
@@ -50,10 +61,34 @@ export default function DashboardScreen() {
     error: bleError,
   } = useBluetooth();
 
+  const {
+    sessionState,
+    hitCount,
+    startedAtMs,
+    busy: sessionBusy,
+    startSession,
+    endSession,
+  } = useSession();
+
   const [modalVisible, setModalVisible] = useState(false);
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const isConnected = isConnectedToPaddle(connectedDevice);
+  const isSessionActive = sessionState === 'active';
+
+  // Tick once a second while recording to drive the elapsed-time readout.
+  useEffect(() => {
+    if (!isSessionActive) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [isSessionActive]);
+
+  const elapsedSec =
+    isSessionActive && startedAtMs
+      ? Math.max(0, Math.floor((nowMs - startedAtMs) / 1000))
+      : 0;
 
   const handleOpenScanner = useCallback(() => {
     setModalVisible(true);
@@ -81,6 +116,15 @@ export default function DashboardScreen() {
   const handleDisconnect = useCallback(async () => {
     await disconnect();
   }, [disconnect]);
+
+  const handleToggleSession = useCallback(() => {
+    // Errors are handled inside the hook; fire-and-forget from the UI.
+    if (isSessionActive) {
+      void endSession();
+    } else {
+      void startSession();
+    }
+  }, [isSessionActive, startSession, endSession]);
 
   // ── Render ─────────────────────────────────────────────────────
 
@@ -122,15 +166,67 @@ export default function DashboardScreen() {
           </Text>
         </View>
 
-        {/* Session Stats Placeholder */}
+        {/* Session Control */}
         <View style={styles.card}>
           <View style={styles.cardHeader}>
-            <Text style={styles.cardLabel}>LAST SESSION</Text>
+            <View
+              style={[
+                styles.statusDot,
+                isSessionActive ? styles.statusOnline : styles.statusOffline,
+              ]}
+            />
+            <Text style={styles.cardLabel}>SESSION</Text>
           </View>
-          <Text style={styles.cardValue}>—</Text>
-          <Text style={styles.cardHint}>
-            No sessions recorded yet
+          <Text
+            style={[
+              styles.cardValue,
+              isSessionActive && styles.cardValueConnected,
+            ]}
+          >
+            {isSessionActive ? formatElapsed(elapsedSec) : 'Ready'}
           </Text>
+          <Text style={styles.cardHint}>
+            {isSessionActive
+              ? `Recording • ${hitCount} ${hitCount === 1 ? 'shot' : 'shots'}`
+              : isConnected
+                ? 'Start a session to record your shots'
+                : 'Connect your paddle to start a session'}
+          </Text>
+
+          <Pressable
+            style={({ pressed }) => [
+              styles.sessionButton,
+              isSessionActive
+                ? styles.endSessionButton
+                : styles.startSessionButton,
+              !isSessionActive &&
+              (!isConnected || sessionBusy) &&
+              styles.sessionButtonDisabled,
+              pressed && styles.buttonPressed,
+            ]}
+            onPress={handleToggleSession}
+            disabled={sessionBusy || (!isSessionActive && !isConnected)}
+          >
+            {sessionBusy ? (
+              <ActivityIndicator
+                size="small"
+                color={isSessionActive ? Colors.text : Colors.onPrimary}
+              />
+            ) : (
+              <Text
+                style={[
+                  isSessionActive
+                    ? styles.endSessionButtonText
+                    : styles.startSessionButtonText,
+                  !isSessionActive &&
+                  !isConnected &&
+                  styles.sessionButtonTextDisabled,
+                ]}
+              >
+                {isSessionActive ? 'End Session' : 'Start Session'}
+              </Text>
+            )}
+          </Pressable>
         </View>
       </View>
 
@@ -427,6 +523,42 @@ const styles = StyleSheet.create({
   },
   buttonPressed: {
     opacity: 0.7,
+  },
+
+  // Session control button (inside the Session card)
+  sessionButton: {
+    marginTop: Spacing.md,
+    borderRadius: Radius.lg,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  startSessionButton: {
+    backgroundColor: Colors.primary,
+  },
+  startSessionButtonText: {
+    ...Typography.bodyLg,
+    color: Colors.onPrimary,
+    fontFamily: 'PlusJakartaSans_700Bold',
+    fontWeight: '700',
+  },
+  endSessionButton: {
+    backgroundColor: Colors.surfaceContainerHigh,
+    borderWidth: 1,
+    borderColor: Colors.outlineVariant,
+  },
+  endSessionButtonText: {
+    ...Typography.bodyLg,
+    color: Colors.text,
+    fontFamily: 'PlusJakartaSans_700Bold',
+    fontWeight: '700',
+  },
+  sessionButtonDisabled: {
+    backgroundColor: Colors.surfaceContainerHigh,
+    opacity: 0.6,
+  },
+  sessionButtonTextDisabled: {
+    color: Colors.muted,
   },
 
   // ── Modal ────────────────────────────────────────────────────

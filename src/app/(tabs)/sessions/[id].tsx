@@ -47,15 +47,22 @@ export default function SessionDetailScreen() {
   }
 
   const { metrics } = session;
+  const isComplete = session.status === 'complete';
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* ── Summary ─────────────────────────────────────── */}
       <Text style={styles.date}>{formatSessionDate(session.startedAt)}</Text>
-      <Text style={styles.subtitle}>{formatDuration(session.durationSec)}</Text>
+      <Text style={styles.subtitle}>
+        {isComplete ? formatDuration(session.durationSec) : 'In progress'}
+      </Text>
 
       {!metrics ? (
-        <Text style={styles.muted}>No metrics for this session yet.</Text>
+        <Text style={styles.muted}>
+          {session.status === 'active'
+            ? 'Session in progress — metrics appear once it ends.'
+            : 'No metrics for this session yet.'}
+        </Text>
       ) : (
         <>
           {/* ── Top-line stats ──────────────────────────── */}

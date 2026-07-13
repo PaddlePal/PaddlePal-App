@@ -2,11 +2,13 @@ import {
   ActivityIndicator,
   FlatList,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { SymbolView } from 'expo-symbols';
 import { useRouter } from 'expo-router';
 
 import { useSessions } from '@/hooks/useSessions';
@@ -17,13 +19,30 @@ import { Typography } from '@/constants/typography';
 import { Spacing, Radius } from '@/constants/spacing';
 
 export default function SessionsScreen() {
-  const { sessions, loading } = useSessions();
+  const { sessions, loading, refreshing, refresh } = useSessions();
   const router = useRouter();
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
         <Text style={styles.title}>Session History</Text>
+        <Pressable
+          onPress={refresh}
+          disabled={loading || refreshing}
+          hitSlop={12}
+          accessibilityRole="button"
+          accessibilityLabel="Refresh sessions"
+          style={({ pressed }) => [
+            styles.refreshButton,
+            (pressed || refreshing) && styles.refreshButtonPressed,
+          ]}
+        >
+          <SymbolView
+            name="arrow.clockwise"
+            tintColor={Colors.primary}
+            size={20}
+          />
+        </Pressable>
       </View>
 
       {loading ? (
@@ -35,6 +54,14 @@ export default function SessionsScreen() {
           data={sessions}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={refresh}
+              tintColor={Colors.primary}
+              colors={[Colors.primary]}
+            />
+          }
           ListEmptyComponent={
             <View style={styles.center}>
               <Text style={styles.empty}>No sessions recorded yet</Text>
@@ -68,7 +95,11 @@ function SessionCard({
         <Text style={styles.cardDate}>
           {formatSessionDate(session.startedAt)}
         </Text>
-        <Text style={styles.cardMeta}>{formatDuration(session.durationSec)}</Text>
+        <Text style={styles.cardMeta}>
+          {session.status === 'complete'
+            ? formatDuration(session.durationSec)
+            : 'In progress'}
+        </Text>
       </View>
       <Text style={styles.chevron}>›</Text>
     </Pressable>
@@ -84,10 +115,26 @@ const styles = StyleSheet.create({
   header: {
     marginTop: Spacing.lg,
     marginBottom: Spacing.lg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   title: {
     ...Typography.headlineLgMobile,
     color: Colors.text,
+  },
+  refreshButton: {
+    width: 40,
+    height: 40,
+    borderRadius: Radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.glassBackground,
+    borderWidth: 1,
+    borderColor: Colors.glassBorder,
+  },
+  refreshButtonPressed: {
+    opacity: 0.6,
   },
   center: {
     flex: 1,

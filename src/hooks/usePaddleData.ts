@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Buffer } from 'buffer';
 import type { BleError, Characteristic, Subscription } from 'react-native-ble-plx';
 
@@ -41,6 +41,17 @@ interface PaddleData {
   zoneCounts: ZoneCounts;
 }
 
+interface UsePaddleDataOptions {
+  /**
+   * Invoked for every decoded FSR hit, in receipt order. Lets a session buffer
+   * (see `useSession`) tap the same single BLE monitor that feeds the live UI,
+   * instead of opening a second `monitorCharacteristicForService` on the same
+   * notify stream. Held in a ref so passing a new callback identity each render
+   * doesn't tear down and rebuild the monitor.
+   */
+  onHit?: (hit: PaddleHit) => void;
+}
+
 function isZoneId(zone: number): zone is ZoneId {
   return zone >= 1 && zone <= 5;
 }
@@ -77,10 +88,18 @@ function decodeHit(value: string | null | undefined): PaddleHit | null {
  * so each connection is a fresh demo session. Tears the monitor down on
  * disconnect / unmount.
  */
-export function usePaddleData(): PaddleData {
+export function usePaddleData(options: UsePaddleDataOptions = {}): PaddleData {
+  const { onHit } = options;
   const { connectedDevice } = useBluetooth();
   const [lastHit, setLastHit] = useState<PaddleHit | null>(null);
   const [zoneCounts, setZoneCounts] = useState<ZoneCounts>(EMPTY_COUNTS);
+
+  // Keep the latest onHit in a ref so the monitor effect below doesn't depend on
+  // its identity (which would resubscribe the BLE notify on every render).
+  const onHitRef = useRef(onHit);
+  useEffect(() => {
+    onHitRef.current = onHit;
+  }, [onHit]);
 
   useEffect(() => {
     // Fresh device → fresh session.
@@ -107,6 +126,9 @@ export function usePaddleData(): PaddleData {
 
           const hit = decodeHit(characteristic?.value);
           if (!hit) return;
+
+          // Feed any session buffer first, then the live UI state.
+          onHitRef.current?.(hit);
 
           setLastHit(hit);
           setZoneCounts((prev) => {
