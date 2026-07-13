@@ -1,17 +1,23 @@
 import { Tabs } from 'expo-router';
 import { StyleSheet } from 'react-native';
+import { SymbolView } from 'expo-symbols';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/colors';
 import { Typography } from '@/constants/typography';
+import { Radius } from '@/constants/spacing';
 
 export default function TabsLayout() {
+  const insets = useSafeAreaInsets();
+
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarStyle: styles.tabBar,
         tabBarActiveTintColor: Colors.primary,
         tabBarInactiveTintColor: Colors.muted,
         tabBarLabelStyle: styles.tabLabel,
+        tabBarItemStyle: styles.tabItem,
+        tabBarStyle: [styles.tabBar, { bottom: insets.bottom + 12 }],
       }}
     >
       <Tabs.Screen
@@ -19,6 +25,13 @@ export default function TabsLayout() {
         options={{
           title: 'Dashboard',
           tabBarLabel: 'Home',
+          tabBarIcon: ({ color, focused }) => (
+            <SymbolView
+              name={focused ? 'house.fill' : 'house'}
+              tintColor={color}
+              size={24}
+            />
+          ),
         }}
       />
       <Tabs.Screen
@@ -26,6 +39,37 @@ export default function TabsLayout() {
         options={{
           title: 'Live',
           tabBarLabel: 'Live',
+          tabBarIcon: ({ color }) => (
+            <SymbolView name="waveform.path.ecg" tintColor={color} size={24} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="sessions"
+        options={{
+          title: 'History',
+          tabBarLabel: 'History',
+          tabBarIcon: ({ color }) => (
+            <SymbolView
+              name="clock.arrow.circlepath"
+              tintColor={color}
+              size={24}
+            />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="settings"
+        options={{
+          title: 'Settings',
+          tabBarLabel: 'Settings',
+          tabBarIcon: ({ color, focused }) => (
+            <SymbolView
+              name={focused ? 'gearshape.fill' : 'gearshape'}
+              tintColor={color}
+              size={24}
+            />
+          ),
         }}
       />
     </Tabs>
@@ -33,12 +77,28 @@ export default function TabsLayout() {
 }
 
 const styles = StyleSheet.create({
+  // Floating, translucent "liquid glass"-ish pill.
   tabBar: {
-    backgroundColor: Colors.surfaceContainer,
-    borderTopWidth: 1,
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    height: 64,
+    paddingTop: 6,
+    paddingBottom: 14,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.glassBackground,
+    borderWidth: 1,
+    borderColor: Colors.glassBorder,
     borderTopColor: Colors.glassBorder,
-    paddingTop: 8,
-    height: 88,
+    // Lift it off the content so it reads as floating.
+    shadowColor: '#000000',
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
+  },
+  tabItem: {
+    paddingTop: 0,
   },
   tabLabel: {
     ...Typography.labelCaps,

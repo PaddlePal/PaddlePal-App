@@ -11,8 +11,6 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { State as BleState } from 'react-native-ble-plx';
 
-import { signOut } from '@react-native-firebase/auth';
-import { auth } from '@/lib/firebase';
 import { useAuth } from '@/hooks/useAuth';
 import { useBluetooth, isConnectedToPaddle } from '@/hooks/useBluetooth';
 import { Colors } from '@/constants/colors';
@@ -56,10 +54,6 @@ export default function DashboardScreen() {
   const [connectingId, setConnectingId] = useState<string | null>(null);
 
   const isConnected = isConnectedToPaddle(connectedDevice);
-
-  const handleSignOut = async () => {
-    await signOut(auth);
-  };
 
   const handleOpenScanner = useCallback(() => {
     setModalVisible(true);
@@ -164,19 +158,6 @@ export default function DashboardScreen() {
             <Text style={styles.connectButtonText}>Connect Paddle</Text>
           </Pressable>
         )}
-      </View>
-
-      {/* ── Sign Out ───────────────────────────────────── */}
-      <View style={styles.footer}>
-        <Pressable
-          style={({ pressed }) => [
-            styles.signOutButton,
-            pressed && styles.buttonPressed,
-          ]}
-          onPress={handleSignOut}
-        >
-          <Text style={styles.signOutText}>Sign Out</Text>
-        </Pressable>
       </View>
 
       {/* ── Bluetooth Scanner Modal ────────────────────── */}
@@ -446,21 +427,6 @@ const styles = StyleSheet.create({
   },
   buttonPressed: {
     opacity: 0.7,
-  },
-
-  // Footer
-  footer: {
-    marginTop: 'auto',
-    paddingBottom: Spacing.lg,
-    alignItems: 'center',
-  },
-  signOutButton: {
-    paddingVertical: Spacing.sm,
-    paddingHorizontal: Spacing.lg,
-  },
-  signOutText: {
-    ...Typography.bodyMd,
-    color: Colors.error,
   },
 
   // ── Modal ────────────────────────────────────────────────────

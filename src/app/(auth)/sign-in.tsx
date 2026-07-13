@@ -13,6 +13,7 @@ import { Link } from 'expo-router';
 
 import { signInWithEmailAndPassword } from '@react-native-firebase/auth';
 import { auth } from '@/lib/firebase';
+import { ShapeGridBackground } from '@/components/ShapeGridBackground';
 import { Colors } from '@/constants/colors';
 import { Typography } from '@/constants/typography';
 import { Spacing, Radius } from '@/constants/spacing';
@@ -70,6 +71,7 @@ export default function SignInScreen() {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
+      <ShapeGridBackground direction="diagonal" speed={0.5} squareSize={48} />
       <View style={styles.inner}>
         {/* ── Header ───────────────────────────────────── */}
         <View style={styles.header}>
@@ -128,7 +130,7 @@ export default function SignInScreen() {
             disabled={loading}
           >
             {loading ? (
-              <ActivityIndicator color={Colors.onPrimary} />
+              <ActivityIndicator color={Colors.primary} />
             ) : (
               <Text style={styles.buttonText}>Sign In</Text>
             )}
@@ -215,7 +217,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.md,
   },
   button: {
-    backgroundColor: Colors.primary,
+    backgroundColor: Colors.surfaceBright,
+    borderWidth: 1,
+    borderColor: Colors.primary,
     borderRadius: Radius.lg,
     paddingVertical: 16,
     alignItems: 'center',
@@ -230,7 +234,7 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     ...Typography.bodyLg,
-    color: Colors.onPrimary,
+    color: Colors.primary,
     fontFamily: 'PlusJakartaSans_700Bold',
     fontWeight: '700',
   },
