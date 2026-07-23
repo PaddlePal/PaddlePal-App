@@ -24,19 +24,22 @@
 //  IMU + FSR + Serial behavior is preserved byte-for-byte from the pre-BLE
 //  baseline.
 // ─────────────────────────────────────────────────────────────────────────────
-#define LOAD_SWITCH_EN D7
-#define POWER_BUTTON   D3
 
-#define POWER_BUTTON_LED A6
-#define STATE_BUTTON_LED A7
-
-volatile int buttonPressCount = 0;
-bool lastButtonState = LOW;
 
 #include "hardware/adc.h"
 #include "pico/multicore.h"
 #include <ArduinoBLE.h>
 #include <Arduino_LSM6DSOX.h>
+#include <WiFiNINA.h>
+
+#define LOAD_SWITCH_EN     D7     // Arduino D7 = RP2040 GPIO7
+#define POWER_BUTTON       D3     // Arduino D3 = RP2040 GPIO3
+
+#define POWER_BUTTON_LED   A6    // RP2040 GPIO21
+#define STATE_BUTTON_LED   A7    // RP2040 GPIO24
+
+volatile int buttonPressCount = 0;
+bool lastButtonState = LOW;
 
 #define FSR_THRESHOLD 150
 #define ACCEL_THRESHOLD 0.05f
