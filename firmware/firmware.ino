@@ -24,6 +24,14 @@
 //  IMU + FSR + Serial behavior is preserved byte-for-byte from the pre-BLE
 //  baseline.
 // ─────────────────────────────────────────────────────────────────────────────
+#define LOAD_SWITCH_EN D7
+#define POWER_BUTTON   D3
+
+#define POWER_BUTTON_LED A6
+#define STATE_BUTTON_LED A7
+
+volatile int buttonPressCount = 0;
+bool lastButtonState = LOW;
 
 #include "hardware/adc.h"
 #include "pico/multicore.h"
@@ -131,7 +139,21 @@ void core1_entry() {
 //  CORE 0 — Mbed-managed: IMU + Serial + BLE + Core 1 launch
 // ─────────────────────────────────────────────
 void setup() {
+  // Assert load switch immediately at boot
+  // Assert load switch immediately at boot
+  pinMode(LOAD_SWITCH_EN, OUTPUT);
+  digitalWrite(LOAD_SWITCH_EN, HIGH);
+
+  pinMode(POWER_BUTTON, INPUT);
+
+  pinMode(POWER_BUTTON_LED, OUTPUT);
+  pinMode(STATE_BUTTON_LED, OUTPUT);
+
+  digitalWrite(POWER_BUTTON_LED, HIGH);
+  digitalWrite(STATE_BUTTON_LED, HIGH);
+
   pinMode(LED_BUILTIN, OUTPUT);
+
 
   Serial.begin(9600);
   while (!Serial)
@@ -205,6 +227,23 @@ void setup() {
 }
 
 void loop() {
+
+  bool currentButtonState = digitalRead(POWER_BUTTON);
+
+// Rising edge detection
+if (currentButtonState == HIGH && lastButtonState == LOW) {
+    buttonPressCount++;
+
+    if (buttonPressCount >= 2) {
+        digitalWrite(LOAD_SWITCH_EN, LOW);  // turn off load switch
+        while (1) {
+            // wait for power to disappear
+        }
+    }
+}
+
+lastButtonState = currentButtonState;
+
   // Must run every pass, unconditionally, for BLE to stay responsive to
   // connect/disconnect and central requests.
   BLE.poll();
