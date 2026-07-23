@@ -32,12 +32,16 @@
 #include <Arduino_LSM6DSOX.h>
 #include <WiFiNINA.h>
 
-#define LOAD_SWITCH_EN     D7     // Arduino D7 = RP2040 GPIO7
-#define POWER_BUTTON       D3     // Arduino D3 = RP2040 GPIO3
+#define LOAD_SWITCH_EN     7   // D7
+#define POWER_BUTTON       3   // D3
+#define MOTOR_OUTPUT       6   // D6
 
-#define POWER_BUTTON_LED   A6    // RP2040 GPIO21
-#define STATE_BUTTON_LED   A7    // RP2040 GPIO24
+#define POWER_BUTTON_LED 21 //A6
+#define STATE_BUTTON_LED 24 //A7
 
+bool motorActive = false;
+unsigned long motorStartTime = 0;
+const unsigned long MOTOR_DURATION = 200;
 volatile int buttonPressCount = 0;
 bool lastButtonState = LOW;
 
@@ -138,6 +142,14 @@ void core1_entry() {
   }
 }
 
+// Motor code
+void triggerMotor() {
+  digitalWrite(MOTOR_OUTPUT, HIGH);
+  motorActive = true;
+  motorStartTime = millis();
+}
+
+
 // ─────────────────────────────────────────────
 //  CORE 0 — Mbed-managed: IMU + Serial + BLE + Core 1 launch
 // ─────────────────────────────────────────────
@@ -156,6 +168,9 @@ void setup() {
   digitalWrite(STATE_BUTTON_LED, HIGH);
 
   pinMode(LED_BUILTIN, OUTPUT);
+
+  pinMode(MOTOR_OUTPUT, OUTPUT);
+  digitalWrite(MOTOR_OUTPUT, LOW);
 
 
   Serial.begin(9600);
@@ -230,7 +245,10 @@ void setup() {
 }
 
 void loop() {
-
+if (motorActive && (millis() - motorStartTime >= MOTOR_DURATION)) {
+  digitalWrite(MOTOR_OUTPUT, LOW);
+  motorActive = false;
+}
   bool currentButtonState = digitalRead(POWER_BUTTON);
 
 // Rising edge detection
@@ -313,7 +331,9 @@ lastButtonState = currentButtonState;
       // Unpack variables back out from the single 32-bit integer
       int zoneNum = packedData >> 16;
       int payload = packedData & 0xFFFF;
-
+      if (zoneNum == 1) {
+        triggerMotor();
+      }
       if (zoneNum == 5) {
         // Unpack and reconstruct the two separate sensor forces for Zone 5
         // Shifting left by 2 restores the 0-255 byte back to the 0-1020 range
