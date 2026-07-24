@@ -1,145 +1,117 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  PaddlePal — Smart Pickleball Paddle Firmware
-//  Board: Arduino Nano RP2040 Connect
-//  Core:  Arduino Mbed OS Nano Boards  (NOT Philhower arduino-pico)
+//  Board: Arduino Nano RP2040 Connect  ·  Core: Arduino Mbed OS Nano Boards
 //
-//  Why the Mbed core: the Philhower arduino-pico core cannot bring up
-//  ArduinoBLE on this board's u-blox NINA-W102 module (BLE.begin() fails,
-//  paddle never advertises). The official Arduino Mbed OS Nano core supports
-//  ArduinoBLE here natively. See memory-bank/progress.md (2026-07-06 "BLE
-//  Discovery Debugging").
+//  Dual-core split:
+//    Core 0 (setup/loop) : IMU + Serial + BLE   — uses Arduino/Mbed APIs
+//    Core 1 (core1_entry): FSR polling          — raw Pico SDK only
 //
-//  Dual-core model: Mbed manages ONLY Core 0 (setup()/loop()) — there is no
-//  setup1()/loop1(). Core 1 is launched manually via the Pico SDK
-//  (multicore_launch_core1). Core 1 runs bare metal and MUST NOT call any
-//  Arduino or Mbed API (no Serial / analogRead / delay / digitalWrite) — raw
-//  Pico SDK only.
-//
-//    Core 0 (setup/loop) : IMU + Serial debug + BLE   (need Arduino APIs)
-//    Core 1 (core1_entry): FSR polling, raw Pico SDK   (dedicated,
-//    contention-free)
-//
-//  This pass adds BLE IDENTITY/ADVERTISING ONLY (discoverable + connectable).
-//  No data characteristics / notify streaming yet — that's a follow-up task.
-//  IMU + FSR + Serial behavior is preserved byte-for-byte from the pre-BLE
-//  baseline.
+//  Must use the Mbed core (NOT Philhower) or ArduinoBLE won't start on the
+//  NINA-W102 module. Full design notes, the Core 1 stack rationale, and the
+//  pin/packet reference live in memory-bank/ (progress.md + architecture.md).
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include "hardware/adc.h"
-#include "pico/multicore.h"
+#include "hardware/adc.h"     // Pico SDK ADC (Core 1)
+#include "pico/multicore.h"   // Core 1 launch + inter-core FIFO
 #include <ArduinoBLE.h>
-#include <Arduino_LSM6DSOX.h>
+#include <Arduino_LSM6DSOX.h> // on-board IMU
 
-#define FSR_THRESHOLD 150
-#define ACCEL_THRESHOLD 0.05f
-#define GYRO_THRESHOLD 1.0f
+// ── Tuning ───────────────────────────────────────────────────────────────────
+#define FSR_THRESHOLD 150     // per-zone hit trigger (0-1023 scale)
+#define ACCEL_THRESHOLD 0.05f // g   — movement gate for Serial prints
+#define GYRO_THRESHOLD 1.0f   // dps — movement gate for Serial prints
 
-// BLE identity — these two values MUST stay in sync with the app's
-// PADDLE_FILTER in src/hooks/useBluetooth.tsx (matches on name OR service
-// UUID). Do not change them here without updating the app to match.
+// ── BLE identity & characteristics ───────────────────────────────────────────
+// Name + service UUID MUST match the app's PADDLE_FILTER (src/hooks/useBluetooth.tsx).
 #define PADDLE_BLE_NAME "PaddlePal-Paddle"
 #define PADDLE_SERVICE_UUID "9590ad2d-fd81-4688-9d3b-65ac36caca3a"
 
 BLEService paddleService(PADDLE_SERVICE_UUID);
-// Minimal read-only placeholder so the advertised service isn't empty on
-// connect. Real FSR/IMU telemetry characteristics are a follow-up task, not
-// this pass.
+// Read-only placeholder so the service isn't empty on connect.
 BLEStringCharacteristic paddleInfo("9590ad2e-fd81-4688-9d3b-65ac36caca3a",
                                    BLERead, 32);
-// Live FSR hit stream: a 4-byte notify carrying the raw inter-core FIFO word
-// (zone in upper 16 bits, FSR payload in lower 16 — see sendFSRPacket()). Sent
-// little-endian on the wire (RP2040). Decoded by the app in
-// src/hooks/usePaddleData.ts with identical unpacking. UUID sequence:
-// ...2d = service, ...2e = paddleInfo, ...2f = fsrData.
+// Live hit stream: a 4-byte notify carrying one raw FIFO word (zone in upper 16
+// bits, payload in lower 16 — see sendFSRPacket). Little-endian; the app decodes
+// it in src/hooks/usePaddleData.ts. UUIDs: …2d service, …2e info, …2f fsrData.
 BLECharacteristic fsrData("9590ad2f-fd81-4688-9d3b-65ac36caca3a",
                           BLERead | BLENotify, 4);
 
-// Helper function to pack data and send to Core 0 via FIFO
-// Zone number goes into upper 16 bits, FSR value goes into lower 16 bits
-// For Zone 5: upper 16 bits = 5, lower 16 bits contains A2 (upper 8) and A3
-// (lower 8)
+// ── Inter-core FIFO helper (Core 1 → Core 0) ─────────────────────────────────
+// Pack a hit into one 32-bit word: zone in upper 16 bits, value in lower 16.
 void sendFSRPacket(int zoneNumber, int fsrVal) {
   uint32_t packedData = ((uint32_t)zoneNumber << 16) | (fsrVal & 0xFFFF);
-  // Drop-if-full: preserves the baseline's non-blocking rp2040.fifo.push_nb()
-  // behavior. wready() guarantees the push won't block; if the FIFO is full we
-  // simply skip so Core 1's FSR polling never stalls.
+  // Drop-if-full so Core 1's polling never blocks when Core 0 is behind.
   if (multicore_fifo_wready()) {
     multicore_fifo_push_blocking(packedData);
   }
 }
 
-// ─────────────────────────────────────────────
-//  CORE 1 — Lightning-fast polling of native pins (raw Pico SDK ONLY)
-// ─────────────────────────────────────────────
-// Launched manually from setup() via multicore_launch_core1(). Runs bare metal:
-// no Arduino/Mbed APIs here. Replaces the baseline's Core-0 setup()/loop() FSR
-// polling — Mbed does not auto-repeat this, so it owns its own while(true).
-//
-// Pin -> ADC channel (fixed RP2040 hardware):
-//   A0 = GPIO26 = ch0,  A1 = GPIO27 = ch1,  A2 = GPIO28 = ch2,  A3 = GPIO29 =
-//   ch3
+// Dedicated Core 1 stack (used by the launch in setup). Explicit buffer instead
+// of the SDK default, which isn't safe under the Mbed linker — see memory-bank.
+// alignas(8): ARM AAPCS requires 8-byte stack alignment.
+alignas(8) static uint32_t core1_stack[2048]; // 8KB
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  CORE 1 — FSR polling (raw Pico SDK only; no Arduino/Mbed APIs here)
+// ─────────────────────────────────────────────────────────────────────────────
+// Sensor → analog pin → GPIO → ADC channel (channel is fixed RP2040 hardware):
+//   zone1 = A0 = GPIO29 = ch3        zone3 = A2 = GPIO27 = ch1
+//   zone2 = A1 = GPIO26 = ch0        zone4 = A3 = GPIO28 = ch2
 void core1_entry() {
+  // ── Enable ADC on the four sensor pins ──
   adc_init();
-  adc_gpio_init(26); // A0
-  adc_gpio_init(27); // A1
-  adc_gpio_init(28); // A2
-  adc_gpio_init(29); // A3
+  adc_gpio_init(29); // A0 / zone1
+  adc_gpio_init(26); // A1 / zone2
+  adc_gpio_init(27); // A2 / zone3
+  adc_gpio_init(28); // A3 / zone4
 
   while (true) {
-    // adc_read() returns the RP2040's native 12-bit value (0-4095). The
-    // baseline used Arduino analogRead() (10-bit, 0-1023), which FSR_THRESHOLD
-    // and the Zone 5 (>> 2) packing are calibrated against. Right-shift by 2
-    // immediately to normalize 12-bit -> 10-bit so all downstream logic stays
-    // byte-for-byte identical to the baseline.
-    //
-    // NOTE: preserve the baseline's deliberate (non-numeric) mapping —
-    // v3 reads from A3 and v4 reads from A2.
-    adc_select_input(0);
-    int v1 = adc_read() >> 2; // A0
-    adc_select_input(1);
-    int v2 = adc_read() >> 2; // A1
+    // ── Read all four zones ──
+    // adc_read() is 12-bit (0-4095); >> 2 normalizes to the 10-bit range
+    // (0-1023) that FSR_THRESHOLD and the Zone 5 packing expect.
     adc_select_input(3);
-    int v3 = adc_read() >> 2; // A3 (baseline: v3 = analogRead(A3))
+    int v1 = adc_read() >> 2; // A0 / zone1
+    adc_select_input(0);
+    int v2 = adc_read() >> 2; // A1 / zone2
+    adc_select_input(1);
+    int v3 = adc_read() >> 2; // A2 / zone3
     adc_select_input(2);
-    int v4 = adc_read() >> 2; // A2 (baseline: v4 = analogRead(A2))
+    int v4 = adc_read() >> 2; // A3 / zone4
 
-    // Process Zone 1 and Zone 2 normally
+    // ── Detect hits & send ──
+    // Zones 1 and 2 are independent.
     if (v1 > FSR_THRESHOLD)
       sendFSRPacket(1, v1);
     if (v2 > FSR_THRESHOLD)
       sendFSRPacket(2, v2);
 
-    // Evaluate overlap logic for Zone 3, 4, and 5
+    // Zones 3/4 overlap — both active is reported as zone 5.
     if (v3 > FSR_THRESHOLD && v4 > FSR_THRESHOLD) {
-      // ZONE 5: Both A2 and A3 are active.
-      // Compress both 10-bit ADC values (0-1023) into the 16-bit payload space:
-      // v3 goes into the upper 8 bits, v4 goes into the lower 8 bits.
-      // (Note: shifting right by 2 scales 0-1023 down to 0-255 to fit 8 bits)
+      // Zone 5: pack both forces into the 16-bit payload, 8 bits each
+      // (>> 2 scales each 0-1023 down to 0-255).
       int compressedVals = ((v3 >> 2) << 8) | (v4 >> 2);
       sendFSRPacket(5, compressedVals);
     } else if (v3 > FSR_THRESHOLD) {
-      // ZONE 3: Only A2 is active
-      sendFSRPacket(3, v3);
+      sendFSRPacket(3, v3); // zone 3 only (A2)
     } else if (v4 > FSR_THRESHOLD) {
-      // ZONE 4: Only A3 is active
-      sendFSRPacket(4, v4);
+      sendFSRPacket(4, v4); // zone 4 only (A3)
     }
   }
 }
 
-// ─────────────────────────────────────────────
-//  CORE 0 — Mbed-managed: IMU + Serial + BLE + Core 1 launch
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  CORE 0 — Mbed-managed: IMU + Serial + BLE, then launches Core 1
+// ─────────────────────────────────────────────────────────────────────────────
 void setup() {
+  // ── Pins & serial ──
   pinMode(LED_BUILTIN, OUTPUT);
 
   Serial.begin(9600);
   while (!Serial)
-    ; // block until a USB serial monitor attaches (baseline behavior)
+    ; // wait for a USB serial monitor to attach
 
-  // IMU bring-up — baseline behavior preserved: failure halts here in a fast
-  // blink loop, which means BLE never comes up if the IMU is dead. Because this
-  // is fatal, no "IMU ready" flag is needed downstream.
+  // ── IMU bring-up ──
+  // Fatal if it fails: fast 200ms blink forever (BLE never comes up).
   if (!IMU.begin()) {
     while (1) {
       digitalWrite(LED_BUILTIN, HIGH);
@@ -151,10 +123,10 @@ void setup() {
 
   Serial.println("=== 5-Zone Native FSR + IMU Ready ===");
 
-  // ── BLE bring-up ────────────────────────────────────────────
+  // ── BLE bring-up ──
   if (!BLE.begin()) {
     Serial.println("[BLE] BLE.begin() FAILED");
-    while (1) { // slow blink (700ms) distinguishes BLE failure from IMU failure
+    while (1) { // fatal: slow 700ms blink
       digitalWrite(LED_BUILTIN, HIGH);
       delay(700);
       digitalWrite(LED_BUILTIN, LOW);
@@ -168,12 +140,10 @@ void setup() {
   paddleInfo.writeValue(PADDLE_BLE_NAME);
   BLE.addService(paddleService);
 
-  // A BLE advertising packet is capped at 31 bytes — a 128-bit service UUID
-  // (18B) and a local name (18B) don't both fit in the main packet. Put the
-  // UUID in the advertising packet and the name in the scan response; iOS
-  // active-scans, so the app sees both (the app matches on name OR service
-  // UUID, and checks the scan-response localName — see
-  // src/hooks/useBluetooth.tsx).
+  // ── Advertising ──
+  // A 31-byte advert can't hold both the 128-bit UUID and the name, so the UUID
+  // goes in the advert and the name in the scan response (iOS active-scans, so
+  // it still sees the name).
   BLEAdvertisingData advData;
   advData.setAdvertisedService(paddleService);
   BLE.setAdvertisingData(advData);
@@ -184,7 +154,7 @@ void setup() {
 
   if (!BLE.advertise()) {
     Serial.println("[BLE] BLE.advertise() FAILED");
-    while (1) { // rapid double-blink distinguishes advertise failure
+    while (1) { // fatal: rapid double-blink
       digitalWrite(LED_BUILTIN, HIGH);
       delay(100);
       digitalWrite(LED_BUILTIN, LOW);
@@ -200,25 +170,27 @@ void setup() {
   Serial.print("' with service ");
   Serial.println(PADDLE_SERVICE_UUID);
 
-  // Launch Core 1 last, once everything it might race against is ready.
-  multicore_launch_core1(core1_entry);
+  // ── Launch Core 1 ──
+  // Last, once everything it might race against is ready. Uses the explicit
+  // core1_stack declared above.
+  multicore_launch_core1_with_stack(core1_entry, core1_stack,
+                                    sizeof(core1_stack));
 }
 
 void loop() {
-  // Must run every pass, unconditionally, for BLE to stay responsive to
-  // connect/disconnect and central requests.
+  // ── BLE poll ──
+  // Every pass, unconditionally — keeps BLE responsive to connect/disconnect.
   BLE.poll();
 
-  // The baseline used a flat delay(50) here, which would now block BLE.poll()
-  // for 50ms every pass. Replace it with a non-blocking millis() gate so BLE
-  // stays responsive while the IMU/print/drain block still runs at the same
-  // ~50ms cadence as before. (FSR timing is unaffected either way — FSR is
-  // isolated on Core 1.)
+  // ── ~50ms timing gate ──
+  // Non-blocking (vs. delay(50)) so BLE.poll() keeps running. FSR timing is
+  // unaffected — that runs on Core 1.
   static uint32_t lastTick = 0;
   if (millis() - lastTick < 50)
     return;
   lastTick = millis();
 
+  // ── Read IMU ──
   float ax = 0, ay = 0, az = 0;
   float gx = 0, gy = 0, gz = 0;
 
@@ -229,15 +201,15 @@ void loop() {
     IMU.readGyroscope(gx, gy, gz);
   }
 
-  // Check if any FSR data is waiting in the FIFO queue
-  bool gotHit = multicore_fifo_rvalid();
+  bool gotHit = multicore_fifo_rvalid(); // FSR hit waiting in the FIFO?
 
-  // Check if board is moving
+  // Is the board moving?
   bool imuActive = (abs(ax) > ACCEL_THRESHOLD) || (abs(ay) > ACCEL_THRESHOLD) ||
                    (abs(gx) > GYRO_THRESHOLD) || (abs(gy) > GYRO_THRESHOLD) ||
                    (abs(gz) > GYRO_THRESHOLD);
 
-  // Only print if moving OR a hit was detected
+  // ── Print IMU + drain FSR hits ──
+  // Only when something happened, to keep the Serial log readable.
   if (imuActive || gotHit) {
     Serial.println("──────────────────────────────");
 
@@ -256,25 +228,19 @@ void loop() {
       Serial.println(gz, 2);
     }
 
-    // Process and print all pending FSR hits collected in the queue
+    // Drain every hit Core 1 has queued.
     while (multicore_fifo_rvalid()) {
       uint32_t packedData = multicore_fifo_pop_blocking();
 
-      // Mirror the raw FIFO word out over BLE as a 4-byte notify, in addition
-      // to the Serial print below. These are the exact bytes Core 1 packed via
-      // sendFSRPacket() (zone in upper 16 bits, payload in lower 16) — no
-      // re-encoding. writeValue() both stores and notifies any subscribed
-      // central; it's a no-op on the air when nothing is subscribed. Serial
-      // output below is unchanged, preserving the byte-for-byte discipline.
+      // Mirror the raw word out over BLE (no re-encode); a no-op on the air when
+      // nothing is subscribed.
       fsrData.writeValue((uint8_t *)&packedData, 4);
 
-      // Unpack variables back out from the single 32-bit integer
-      int zoneNum = packedData >> 16;
-      int payload = packedData & 0xFFFF;
+      int zoneNum = packedData >> 16;    // unpack zone
+      int payload = packedData & 0xFFFF; // unpack payload
 
       if (zoneNum == 5) {
-        // Unpack and reconstruct the two separate sensor forces for Zone 5
-        // Shifting left by 2 restores the 0-255 byte back to the 0-1020 range
+        // Zone 5: two forces packed 8 bits each; << 2 restores 0-255 → 0-1020.
         int fsrA2 = (payload >> 8) << 2;
         int fsrA3 = (payload & 0xFF) << 2;
 
@@ -286,7 +252,7 @@ void loop() {
         Serial.print(fsrA3);
         Serial.println(" / 1023");
       } else {
-        // Standard printing for Zones 1, 2, 3, and 4
+        // Zones 1-4: single force value.
         Serial.print("[FSR] zone");
         Serial.print(zoneNum);
         Serial.print(" HIT: ");
