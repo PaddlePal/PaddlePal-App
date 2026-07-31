@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   FlatList,
   Modal,
   Pressable,
@@ -54,10 +55,13 @@ export default function DashboardScreen() {
     isScanning,
     devices,
     connectedDevice,
+    connectionPhase,
     startScan,
     stopScan,
     connectToDevice,
     disconnect,
+    runAutoConnectLoop,
+    stopAutoConnectLoop,
     error: bleError,
   } = useBluetooth();
 
@@ -77,6 +81,49 @@ export default function DashboardScreen() {
   const isConnected = isConnectedToPaddle(connectedDevice);
   const isSessionActive = sessionState === 'active';
 
+  // "Working on it" — the auto-connect loop or a manual scan is in flight, so
+  // the card shows a live third state instead of a flat "Not Connected".
+  const isSeeking =
+    !isConnected &&
+    (connectionPhase === 'scanning' ||
+      connectionPhase === 'connecting' ||
+      connectionPhase === 'reconnecting');
+
+  const paddleStatus = isConnected
+    ? 'Connected'
+    : connectionPhase === 'connecting'
+      ? 'Connecting…'
+      : connectionPhase === 'reconnecting'
+        ? 'Reconnecting…'
+        : connectionPhase === 'scanning'
+          ? 'Searching…'
+          : 'Not Connected';
+
+  // Pulse the status dot while hunting for the paddle.
+  const dotPulse = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (!isSeeking) {
+      dotPulse.setValue(1);
+      return;
+    }
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(dotPulse, {
+          toValue: 0.25,
+          duration: 700,
+          useNativeDriver: true,
+        }),
+        Animated.timing(dotPulse, {
+          toValue: 1,
+          duration: 700,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, [isSeeking, dotPulse]);
+
   // Tick once a second while recording to drive the elapsed-time readout.
   useEffect(() => {
     if (!isSessionActive) return;
@@ -91,17 +138,22 @@ export default function DashboardScreen() {
       : 0;
 
   const handleOpenScanner = useCallback(() => {
+    // Hand the radio over to the manual picker so the two scans never overlap.
+    stopAutoConnectLoop();
     setModalVisible(true);
     if (adapterState === BleState.PoweredOn) {
       startScan();
     }
-  }, [adapterState, startScan]);
+  }, [adapterState, startScan, stopAutoConnectLoop]);
 
   const handleCloseScanner = useCallback(() => {
     stopScan();
     setModalVisible(false);
     setConnectingId(null);
-  }, [stopScan]);
+    // Resume hunting. Self-guarding — no-ops if we're connected or the user
+    // disconnected on purpose.
+    runAutoConnectLoop();
+  }, [runAutoConnectLoop, stopScan]);
 
   const handleConnect = useCallback(
     async (device: (typeof devices)[number]) => {
@@ -109,8 +161,11 @@ export default function DashboardScreen() {
       await connectToDevice(device);
       setConnectingId(null);
       setModalVisible(false);
+      // Only does anything if the connect failed — otherwise we're connected
+      // and the loop no-ops.
+      runAutoConnectLoop();
     },
-    [connectToDevice],
+    [connectToDevice, runAutoConnectLoop],
   );
 
   const handleDisconnect = useCallback(async () => {
@@ -143,10 +198,15 @@ export default function DashboardScreen() {
         {/* Paddle Status */}
         <View style={styles.card}>
           <View style={styles.cardHeader}>
-            <View
+            <Animated.View
               style={[
                 styles.statusDot,
-                isConnected ? styles.statusOnline : styles.statusOffline,
+                isConnected
+                  ? styles.statusOnline
+                  : isSeeking
+                    ? styles.statusSeeking
+                    : styles.statusOffline,
+                isSeeking && { opacity: dotPulse },
               ]}
             />
             <Text style={styles.cardLabel}>PADDLE SENSOR</Text>
@@ -155,14 +215,17 @@ export default function DashboardScreen() {
             style={[
               styles.cardValue,
               isConnected && styles.cardValueConnected,
+              isSeeking && styles.cardValueSeeking,
             ]}
           >
-            {isConnected ? 'Connected' : 'Not Connected'}
+            {paddleStatus}
           </Text>
           <Text style={styles.cardHint}>
             {isConnected
               ? connectedDevice?.name ?? 'PaddlePal Device'
-              : 'Pair your PaddlePal to start tracking'}
+              : isSeeking
+                ? 'Looking for your paddle…'
+                : 'Pair your PaddlePal to start tracking'}
           </Text>
         </View>
 
@@ -462,6 +525,11 @@ const styles = StyleSheet.create({
   cardValueConnected: {
     color: Colors.success,
   },
+  // Action Blue is DESIGN.md's connectivity/syncing colour — used here for the
+  // in-between "searching / reconnecting" state.
+  cardValueSeeking: {
+    color: Colors.bluetooth,
+  },
   cardHint: {
     ...Typography.bodyMd,
     color: Colors.onSurfaceVariant,
@@ -473,6 +541,9 @@ const styles = StyleSheet.create({
   },
   statusOnline: {
     backgroundColor: Colors.success,
+  },
+  statusSeeking: {
+    backgroundColor: Colors.bluetooth,
   },
   statusOffline: {
     backgroundColor: Colors.muted,

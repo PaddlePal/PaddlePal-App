@@ -25,7 +25,32 @@ const PADDLE_FILTER = {
 const PADDLE_SERVICE_UUID = '9590ad2d-fd81-4688-9d3b-65ac36caca3a';
 const SESSION_CONTROL_CHAR_UUID = '9590ad30-fd81-4688-9d3b-65ac36caca3a';
 
+// ── Tunables ─────────────────────────────────────────────────────
+/** How long one scan pass runs before it gives up (manual and auto alike). */
+const SCAN_TIMEOUT_MS = 15_000;
+/**
+ * Pause between auto-connect scan passes. Long enough to avoid hammering
+ * startDeviceScan/stopDeviceScan back-to-back (iOS CoreBluetooth rate-limits
+ * and warns on that), short enough to catch the paddle soon after a ~4s
+ * watchdog reboot. A starting guess — tune on hardware.
+ */
+const AUTO_RETRY_DELAY_MS = 3_000;
+
 // ── Types ────────────────────────────────────────────────────────
+
+/**
+ * Connection lifecycle, exposed for presentation/orchestration.
+ * `connectedDevice` stays the source of truth for "are we actually connected";
+ * this is layered on top so the UI can tell "never connected" apart from
+ * "lost it, actively hunting for it again".
+ */
+export type ConnectionPhase =
+  | 'idle'
+  | 'scanning'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting';
+
 interface DiscoveredDevice {
   id: string;
   name: string | null;
@@ -45,6 +70,8 @@ interface BluetoothContextValue {
   devices: DiscoveredDevice[];
   /** Currently connected device, or null */
   connectedDevice: DiscoveredDevice | null;
+  /** Where we are in the connect lifecycle (drives the "Reconnecting…" UI) */
+  connectionPhase: ConnectionPhase;
   /** Start scanning for BLE peripherals */
   startScan: () => void;
   /** Stop an active scan */
@@ -53,6 +80,17 @@ interface BluetoothContextValue {
   connectToDevice: (device: DiscoveredDevice) => Promise<void>;
   /** Disconnect from the current device */
   disconnect: () => Promise<void>;
+  /**
+   * Start (or resume) the foreground auto-connect loop. Self-guarding: no-ops
+   * when already connected, already looping, when the adapter isn't powered on,
+   * or after a user-initiated disconnect — so callers can fire it freely.
+   */
+  runAutoConnectLoop: () => void;
+  /**
+   * Pause the auto-connect loop and cancel its in-flight scan pass — used while
+   * the manual scanner modal owns the radio, so the two scans never overlap.
+   */
+  stopAutoConnectLoop: () => void;
   /**
    * Best-effort write of session-active state to the paddle's session-control
    * characteristic. No-ops silently when the characteristic isn't present on
@@ -82,6 +120,34 @@ function ignoreBleRejection(result: unknown): void {
       console.warn('[BLE] Ignored operation rejection:', err?.message ?? err);
     });
   }
+}
+
+/** Resolves after `ms`. Spaces out auto-connect scan passes. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Normalises a raw BLE-PLX device into the shape the app passes around. */
+function toDiscoveredDevice(device: Device): DiscoveredDevice {
+  return {
+    id: device.id,
+    name: device.name ?? device.localName ?? null,
+    rssi: device.rssi,
+    serviceUUIDs: device.serviceUUIDs ?? null,
+    raw: device,
+  };
+}
+
+/** Callbacks for one pass of the shared scan core (see `beginFilteredScan`). */
+interface FilteredScanHandlers {
+  /** Pass duration before the scan stops itself. */
+  timeoutMs: number;
+  /** Called for every discovered device that passes the paddle filter. */
+  onMatch: (device: Device) => void;
+  /** Called on a scan error (the pass stops afterwards). */
+  onError?: (error: BleError) => void;
+  /** Called exactly once when the pass ends — timeout, error, or cancellation. */
+  onStop?: () => void;
 }
 
 
@@ -137,7 +203,43 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
   const [isScanning, setIsScanning] = useState(false);
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<DiscoveredDevice | null>(null);
+  const [connectionPhase, setConnectionPhase] = useState<ConnectionPhase>('idle');
   const [error, setError] = useState<string | null>(null);
+
+  // Refs mirror the state the auto-connect loop and the BLE callbacks read
+  // synchronously — React state updates are async and would race the loop.
+  const adapterStateRef = useRef<BleState>(BleState.Unknown);
+  const connectedDeviceRef = useRef<DiscoveredDevice | null>(null);
+  /**
+   * True once a connection has succeeded this app session, so later attempts
+   * read as "Reconnecting…" rather than a first-time "Searching…".
+   */
+  const hasConnectedRef = useRef(false);
+  /**
+   * Set only by `disconnect()` — "the user chose this, stay disconnected".
+   * Cleared by any connect attempt. This is what separates an unexpected drop
+   * (auto-reconnect) from a deliberate one (stay put until the user acts).
+   */
+  const intentionalDisconnectRef = useRef(false);
+  /** Guards against two auto-connect loops running at once. */
+  const autoConnectLoopRef = useRef(false);
+  /**
+   * Identity of the current loop run, bumped on every start and stop. A loop
+   * that was stopped mid-`sleep` can otherwise wake up to find the flag set
+   * again by a *newer* loop and carry on alongside it — the generation check is
+   * what makes a stopped loop stay stopped.
+   */
+  const autoConnectGenerationRef = useRef(0);
+  /** Cancels the scan pass the auto-connect loop currently owns, if any. */
+  const autoScanStopRef = useRef<(() => void) | null>(null);
+  /** Cancels whichever scan is registered right now — manual or auto. */
+  const activeScanStopRef = useRef<(() => void) | null>(null);
+  /**
+   * Late-bound `runAutoConnectLoop`, so the `onDisconnected` handler registered
+   * inside `connectToDevice` can restart the loop without the two callbacks
+   * depending on each other.
+   */
+  const runAutoConnectRef = useRef<() => void>(() => {});
 
   // Initialise BleManager once
   useEffect(() => {
@@ -149,6 +251,8 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
       managerRef.current = manager;
 
       subscription = manager.onStateChange((state) => {
+        // Ref first: the auto-connect loop's while-condition reads it directly.
+        adapterStateRef.current = state;
         setAdapterState(state);
       }, true);
     } catch (err) {
@@ -157,10 +261,17 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
         '[BLE] Native module not available. Rebuild the app with `npx expo prebuild --clean && npm run ios`.',
         err,
       );
+      adapterStateRef.current = BleState.Unsupported;
       setAdapterState(BleState.Unsupported);
     }
 
     return () => {
+      // Stop the loop and cancel any in-flight pass (clears its timeout) while
+      // the manager is still alive, before tearing it down.
+      autoConnectLoopRef.current = false;
+      autoScanStopRef.current = null;
+      activeScanStopRef.current?.();
+      activeScanStopRef.current = null;
       subscription?.remove();
       ignoreBleRejection(manager?.stopDeviceScan());
       ignoreBleRejection(manager?.destroy());
@@ -168,7 +279,125 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // ── Scan ─────────────────────────────────────────────────────
+  // ── Phase helpers ────────────────────────────────────────────
+
+  /** Label for "not connected, but actively working on it". */
+  const seekingPhase = useCallback(
+    (): ConnectionPhase => (hasConnectedRef.current ? 'reconnecting' : 'scanning'),
+    [],
+  );
+
+  /** The phase to settle on whenever an attempt or a scan pass finishes. */
+  const derivePhase = useCallback((): ConnectionPhase => {
+    if (connectedDeviceRef.current) return 'connected';
+    if (autoConnectLoopRef.current || activeScanStopRef.current) return seekingPhase();
+    return 'idle';
+  }, [seekingPhase]);
+
+  // ── Scan core ────────────────────────────────────────────────
+
+  /**
+   * Runs one paddle-filtered scan pass and returns its stop function (null when
+   * the native manager isn't available).
+   *
+   * Both callers — the manual picker and the auto-connect loop — go through
+   * here, and any pass already running is torn down first, so two
+   * `startDeviceScan` calls can never be registered at the same time (iOS
+   * CoreBluetooth rate-limits/warns on that, and BLE-PLX surfaces it as an
+   * opaque scan error).
+   */
+  const beginFilteredScan = useCallback(
+    ({ timeoutMs, onMatch, onError, onStop }: FilteredScanHandlers): (() => void) | null => {
+      const manager = managerRef.current;
+      if (!manager) return null;
+
+      activeScanStopRef.current?.();
+
+      let stopped = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        if (timer) clearTimeout(timer);
+        if (activeScanStopRef.current === stop) activeScanStopRef.current = null;
+        ignoreBleRejection(manager.stopDeviceScan());
+        onStop?.();
+      };
+
+      activeScanStopRef.current = stop;
+      timer = setTimeout(stop, timeoutMs);
+
+      // Scan for ALL advertisements (null filter), then match client-side.
+      // We deliberately do NOT pass the service UUID as an OS-level scan filter:
+      // a 128-bit UUID + the local name can exceed the 31-byte advertising packet
+      // limit, so the UUID may live only in the scan response (or be dropped) and
+      // a UUID-filtered scan would never surface the paddle at all. Client-side
+      // matching on name OR UUID (see isPaddleDevice) is far more reliable.
+      ignoreBleRejection(
+        manager.startDeviceScan(
+          null,
+          { allowDuplicates: false },
+          (bleError, device) => {
+            if (bleError) {
+              onError?.(bleError);
+              stop();
+              return;
+            }
+
+            if (!device) return;
+
+            // Second layer: covers the name-only match case (a UUID-based scan
+            // filter won't surface those), and is a no-op safety net otherwise.
+            if (!isPaddleDevice(device)) return;
+
+            onMatch(device);
+          },
+        ),
+      );
+
+      return stop;
+    },
+    [],
+  );
+
+  /**
+   * One scan pass for the auto-connect loop. Resolves with the first device
+   * that passes the paddle filter, or null when the pass times out, errors, or
+   * is cancelled (`stopAutoConnectLoop`, or a manual scan taking the radio).
+   */
+  const scanOnceForMatch = useCallback(
+    (timeoutMs: number): Promise<Device | null> =>
+      new Promise((resolve) => {
+        // Held in an object so the value survives the callback boundary.
+        const found: { device: Device | null } = { device: null };
+        let stopPass: (() => void) | null = null;
+
+        stopPass = beginFilteredScan({
+          timeoutMs,
+          onMatch: (device) => {
+            found.device = device;
+            stopPass?.();
+          },
+          onError: (bleError) => {
+            console.warn('[BLE] Auto-connect scan error:', bleError.message);
+          },
+          onStop: () => {
+            autoScanStopRef.current = null;
+            resolve(found.device);
+          },
+        });
+
+        if (!stopPass) {
+          resolve(null);
+          return;
+        }
+        autoScanStopRef.current = stopPass;
+      }),
+    [beginFilteredScan],
+  );
+
+  // ── Scan (manual picker) ─────────────────────────────────────
 
   const startScan = useCallback(() => {
     const manager = managerRef.current;
@@ -182,119 +411,210 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
     setError(null);
     setDevices([]);
     setIsScanning(true);
+    if (!connectedDeviceRef.current) setConnectionPhase(seekingPhase());
 
-    // Scan for ALL advertisements (null filter), then match client-side.
-    // We deliberately do NOT pass the service UUID as an OS-level scan filter:
-    // a 128-bit UUID + the local name can exceed the 31-byte advertising packet
-    // limit, so the UUID may live only in the scan response (or be dropped) and
-    // a UUID-filtered scan would never surface the paddle at all. Client-side
-    // matching on name OR UUID (see isPaddleDevice) is far more reliable.
-    ignoreBleRejection(
-      manager.startDeviceScan(
-        null,
-        { allowDuplicates: false },
-        (bleError, device) => {
-          if (bleError) {
-            console.error('[BLE] Scan error:', bleError.message);
-            setError(bleError.message);
-            setIsScanning(false);
-            return;
+    beginFilteredScan({
+      timeoutMs: SCAN_TIMEOUT_MS,
+      onMatch: (device) => {
+        const discovered = toDiscoveredDevice(device);
+        setDevices((prev) => {
+          // Deduplicate by ID, update RSSI if already present
+          const existing = prev.findIndex((d) => d.id === discovered.id);
+          if (existing >= 0) {
+            const updated = [...prev];
+            updated[existing] = discovered;
+            return updated;
           }
-
-          if (!device) return;
-
-          // Second layer: covers the name-only match case (a UUID-based scan
-          // filter won't surface those), and is a no-op safety net otherwise.
-          if (!isPaddleDevice(device)) return;
-
-          const discovered: DiscoveredDevice = {
-            id: device.id,
-            name: device.name ?? device.localName ?? null,
-            rssi: device.rssi,
-            serviceUUIDs: device.serviceUUIDs ?? null,
-            raw: device,
-          };
-
-          setDevices((prev) => {
-            // Deduplicate by ID, update RSSI if already present
-            const existing = prev.findIndex((d) => d.id === device.id);
-            if (existing >= 0) {
-              const updated = [...prev];
-              updated[existing] = discovered;
-              return updated;
-            }
-            return [...prev, discovered];
-          });
-        },
-      ),
-    );
-
-    // Auto-stop after 15 seconds to save battery
-    setTimeout(() => {
-      ignoreBleRejection(manager.stopDeviceScan());
-      setIsScanning(false);
-    }, 15_000);
-  }, [adapterState]);
+          return [...prev, discovered];
+        });
+      },
+      onError: (bleError) => {
+        console.error('[BLE] Scan error:', bleError.message);
+        setError(bleError.message);
+      },
+      onStop: () => {
+        setIsScanning(false);
+        setConnectionPhase(derivePhase());
+      },
+    });
+  }, [adapterState, beginFilteredScan, derivePhase, seekingPhase]);
 
   const stopScan = useCallback(() => {
-    ignoreBleRejection(managerRef.current?.stopDeviceScan());
+    activeScanStopRef.current?.();
     setIsScanning(false);
   }, []);
 
   // ── Connect ──────────────────────────────────────────────────
 
-  const connectToDevice = useCallback(async (device: DiscoveredDevice) => {
-    const manager = managerRef.current;
-    if (!manager) return;
+  const connectToDevice = useCallback(
+    async (device: DiscoveredDevice) => {
+      const manager = managerRef.current;
+      if (!manager) return;
 
-    // Stop scanning before connecting
-    ignoreBleRejection(manager.stopDeviceScan());
-    setIsScanning(false);
-    setError(null);
+      // Any connect attempt — manual or automatic — re-arms auto-reconnect.
+      intentionalDisconnectRef.current = false;
+
+      // Free the radio before connecting
+      activeScanStopRef.current?.();
+      setIsScanning(false);
+      setError(null);
+      setConnectionPhase('connecting');
+
+      try {
+        const connected = await device.raw.connect({ timeout: 10_000 });
+        await connected.discoverAllServicesAndCharacteristics();
+
+        // Monitor disconnection
+        connected.onDisconnected((disconnectError) => {
+          console.log('[BLE] Device disconnected:', device.name ?? device.id);
+          connectedDeviceRef.current = null;
+          setConnectedDevice(null);
+          if (disconnectError) {
+            setError(`Device disconnected: ${disconnectError.message}`);
+          }
+
+          if (intentionalDisconnectRef.current) {
+            // The user asked for this — stay disconnected until they act.
+            setConnectionPhase('idle');
+            return;
+          }
+
+          // Unexpected drop (paddle powered off, watchdog reboot, out of
+          // range) → start hunting for it again. Trigger point 2.
+          setConnectionPhase(seekingPhase());
+          runAutoConnectRef.current();
+        });
+
+        const next: DiscoveredDevice = {
+          id: connected.id,
+          name: connected.name ?? connected.localName ?? device.name,
+          rssi: device.rssi,
+          serviceUUIDs: connected.serviceUUIDs ?? device.serviceUUIDs,
+          raw: connected,
+        };
+
+        connectedDeviceRef.current = next;
+        hasConnectedRef.current = true;
+        setConnectedDevice(next);
+        setConnectionPhase('connected');
+      } catch (err) {
+        const message = err instanceof BleError ? err.message : 'Failed to connect to device.';
+        console.error('[BLE] Connection error:', message);
+        setError(message);
+        setConnectionPhase(derivePhase());
+      }
+    },
+    [derivePhase, seekingPhase],
+  );
+
+  // ── Auto-connect / auto-reconnect ────────────────────────────
+
+  const stopAutoConnectLoop = useCallback(() => {
+    autoConnectLoopRef.current = false;
+    autoConnectGenerationRef.current += 1;
+    // Cancel the loop's own in-flight pass so the radio frees up immediately
+    // instead of at the end of its 15s timeout.
+    autoScanStopRef.current?.();
+    autoScanStopRef.current = null;
+  }, []);
+
+  /**
+   * Scan-and-connect until the paddle is found. Foreground-only by design (see
+   * memory-bank/PLAN-ble-auto-reconnect.md) — this runs while the app is open
+   * and the adapter is on, and exits as soon as we connect, the user
+   * disconnects deliberately, or the manual picker takes over.
+   */
+  const runAutoConnectLoop = useCallback(async () => {
+    if (autoConnectLoopRef.current) return; // already hunting
+    if (connectedDeviceRef.current) return; // nothing to do
+    if (intentionalDisconnectRef.current) return; // user said stop
+    if (!managerRef.current) return;
+    if (adapterStateRef.current !== BleState.PoweredOn) return;
+
+    autoConnectLoopRef.current = true;
+    autoConnectGenerationRef.current += 1;
+    const generation = autoConnectGenerationRef.current;
+    /** False as soon as this run is stopped or superseded by a newer one. */
+    const isCurrentRun = () =>
+      autoConnectLoopRef.current && autoConnectGenerationRef.current === generation;
+
+    setConnectionPhase(seekingPhase());
 
     try {
-      const connected = await device.raw.connect({ timeout: 10_000 });
-      await connected.discoverAllServicesAndCharacteristics();
+      while (
+        isCurrentRun() &&
+        !intentionalDisconnectRef.current &&
+        !connectedDeviceRef.current &&
+        managerRef.current &&
+        adapterStateRef.current === BleState.PoweredOn
+      ) {
+        const found = await scanOnceForMatch(SCAN_TIMEOUT_MS);
 
-      // Monitor disconnection
-      connected.onDisconnected((disconnectError) => {
-        console.log('[BLE] Device disconnected:', device.name ?? device.id);
-        setConnectedDevice(null);
-        if (disconnectError) {
-          setError(`Device disconnected: ${disconnectError.message}`);
+        // The pass may have been cancelled while it was in flight.
+        if (!isCurrentRun() || intentionalDisconnectRef.current) break;
+
+        if (found) {
+          // connectToDevice owns the 'connecting' → 'connected' transition.
+          await connectToDevice(toDiscoveredDevice(found));
+          if (connectedDeviceRef.current) break; // success
         }
-      });
 
-      setConnectedDevice({
-        id: connected.id,
-        name: connected.name ?? connected.localName ?? device.name,
-        rssi: device.rssi,
-        serviceUUIDs: connected.serviceUUIDs ?? device.serviceUUIDs,
-        raw: connected,
-      });
-    } catch (err) {
-      const message = err instanceof BleError ? err.message : 'Failed to connect to device.';
-      console.error('[BLE] Connection error:', message);
-      setError(message);
+        if (!isCurrentRun()) break;
+        await sleep(AUTO_RETRY_DELAY_MS);
+      }
+    } finally {
+      // Only tidy up if we're still the live run — a newer loop owns the flag
+      // and the phase otherwise.
+      if (autoConnectGenerationRef.current === generation) {
+        autoConnectLoopRef.current = false;
+        setConnectionPhase(derivePhase());
+      }
     }
-  }, []);
+  }, [connectToDevice, derivePhase, scanOnceForMatch, seekingPhase]);
+
+  // Late-bind for the onDisconnected handler above (trigger point 2).
+  useEffect(() => {
+    runAutoConnectRef.current = runAutoConnectLoop;
+  }, [runAutoConnectLoop]);
+
+  // Trigger point 1: the adapter becomes usable → start hunting. Covers a cold
+  // app launch with the paddle already advertising, and Bluetooth being
+  // switched back on mid-session.
+  useEffect(() => {
+    if (adapterState === BleState.PoweredOn) {
+      void runAutoConnectLoop();
+      return;
+    }
+    // Radio unusable — nothing to hunt with.
+    stopAutoConnectLoop();
+    if (!connectedDeviceRef.current) setConnectionPhase('idle');
+  }, [adapterState, runAutoConnectLoop, stopAutoConnectLoop]);
 
   // ── Disconnect ───────────────────────────────────────────────
 
   const disconnect = useCallback(async () => {
-    if (!connectedDevice) return;
+    // Mark intent BEFORE tearing the link down: onDisconnected fires from this
+    // and must not read it as an unexpected drop.
+    intentionalDisconnectRef.current = true;
+    stopAutoConnectLoop();
+    setConnectionPhase('idle');
+
+    const device = connectedDeviceRef.current;
+    if (!device) return;
 
     try {
-      const isConnected = await connectedDevice.raw.isConnected();
+      const isConnected = await device.raw.isConnected();
       if (isConnected) {
-        await connectedDevice.raw.cancelConnection();
+        await device.raw.cancelConnection();
       }
     } catch (err) {
       console.error('[BLE] Disconnect error:', err);
     } finally {
+      connectedDeviceRef.current = null;
       setConnectedDevice(null);
+      setConnectionPhase('idle');
     }
-  }, [connectedDevice]);
+  }, [stopAutoConnectLoop]);
 
   // ── Session control (forward-declared characteristic) ────────
 
@@ -327,14 +647,31 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
       isScanning,
       devices,
       connectedDevice,
+      connectionPhase,
       startScan,
       stopScan,
       connectToDevice,
       disconnect,
+      runAutoConnectLoop,
+      stopAutoConnectLoop,
       writeSessionState,
       error,
     }),
-    [adapterState, isScanning, devices, connectedDevice, startScan, stopScan, connectToDevice, disconnect, writeSessionState, error],
+    [
+      adapterState,
+      isScanning,
+      devices,
+      connectedDevice,
+      connectionPhase,
+      startScan,
+      stopScan,
+      connectToDevice,
+      disconnect,
+      runAutoConnectLoop,
+      stopAutoConnectLoop,
+      writeSessionState,
+      error,
+    ],
   );
 
   return (
