@@ -7,32 +7,55 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 
 import { doc, setDoc } from '@react-native-firebase/firestore';
 import { firestore } from '@/lib/firebase';
 import { useAuth } from '@/hooks/useAuth';
+import { useBluetooth } from '@/hooks/useBluetooth';
+import {
+  TOUR_AUTO_CONNECT_SOURCE,
+  TOUR_PARAM_VALUE,
+} from '@/constants/tourSteps';
 import { Colors } from '@/constants/colors';
 import { Typography } from '@/constants/typography';
 import { Spacing, Radius } from '@/constants/spacing';
 
 export default function WelcomeScreen() {
   const { user } = useAuth();
+  const { setAutoConnectEnabled } = useBluetooth();
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
 
   /**
-   * Complete onboarding by marking user onboarded → true.
-   * The real-time auth listener will automatically redirect the user to the dashboard.
+   * Complete onboarding (`onboarded` → true) and hand straight over to the
+   * in-context tour.
+   *
+   * Navigating explicitly rather than leaning on the root Auth Gate's reactive
+   * redirect is what carries the `tour` param — which is the entire "plays
+   * once" mechanism: a normal relaunch lands on the dashboard without it. The
+   * Auth Gate's redirect is untouched and still covers every other transition.
    */
   const handleGetStarted = async () => {
     if (!user) return;
 
     setLoading(true);
+    // Claim the tour's auto-connect hold BEFORE the flag flips. The Auth Gate
+    // releases its own hold the instant `onboarded` becomes true, and the tour
+    // can't claim one until the tabs tree mounts — without this the loop could
+    // arm in that gap and connect the paddle before the Connect Paddle step.
+    setAutoConnectEnabled(false, TOUR_AUTO_CONNECT_SOURCE);
     try {
       const userRef = doc(firestore, 'users', user.uid);
       await setDoc(userRef, { onboarded: true }, { merge: true });
+      router.replace({
+        pathname: '/(tabs)/dashboard',
+        params: { tour: TOUR_PARAM_VALUE },
+      });
     } catch (err) {
       console.error('[WelcomeScreen] Error completing onboarding:', err);
-    } finally {
+      // Onboarding didn't complete — no tour is coming, so give the radio back.
+      setAutoConnectEnabled(true, TOUR_AUTO_CONNECT_SOURCE);
       setLoading(false);
     }
   };
@@ -47,16 +70,16 @@ export default function WelcomeScreen() {
         <Text style={styles.brand}>PADDLEPAL</Text>
         <Text style={styles.title}>Welcome to{'\n'}PaddlePal Connect</Text>
         <Text style={styles.body}>
-          Your smart paddle companion is almost ready. We'll walk you through
-          connecting your paddle and customizing your experience.
+          Your smart paddle companion is ready. Let's get you set up and show
+          you around.
         </Text>
 
-        {/* ── Placeholder card ─────────────────────────── */}
+        {/* ── What happens next ────────────────────────── */}
         <View style={styles.card}>
-          <Text style={styles.cardLabel}>ONBOARDING</Text>
+          <Text style={styles.cardLabel}>QUICK TOUR</Text>
           <Text style={styles.cardBody}>
-            Full onboarding flow coming soon — paddle pairing, sensor
-            calibration, and profile setup.
+            A quick lap of the app: connecting your paddle, recording a real
+            session, watching your hits land live, and where your stats live.
           </Text>
         </View>
       </View>

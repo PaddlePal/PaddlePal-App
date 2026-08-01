@@ -20,6 +20,7 @@ import { Radius, Spacing } from '@/constants/spacing';
 import { Typography } from '@/constants/typography';
 import { isConnectedToPaddle, useBluetooth } from '@/hooks/useBluetooth';
 import { usePaddleData, type PaddleHit, type ZoneId } from '@/hooks/usePaddleData';
+import { TourTarget } from '@/components/tour/TourTarget';
 
 // The paddle is drawn from plain Views (rounded-rect head + rectangular handle) —
 // no image, no react-native-svg, so nothing forces a native rebuild.
@@ -133,23 +134,25 @@ export default function LiveScreen() {
       </View>
 
       <View style={styles.paddleWrap}>
-        <View
-          style={[
-            styles.paddleBox,
-            { width: paddleW, height: paddleH },
-            !connected && styles.paddleDim,
-          ]}
-        >
-          {/* Handle — drawn first so the head sits over the seam */}
-          <View style={styles.handle} />
+        <TourTarget id="live-paddle">
+          <View
+            style={[
+              styles.paddleBox,
+              { width: paddleW, height: paddleH },
+              !connected && styles.paddleDim,
+            ]}
+          >
+            {/* Handle — drawn first so the head sits over the seam */}
+            <View style={styles.handle} />
 
-          {/* Head — rounded-rect face that hosts the zone grid */}
-          <View style={[styles.head, { borderRadius: headRadius }]}>
-            {ZONES.map((z) => (
-              <ZoneOverlay key={z.zone} zone={z.zone} box={zoneBox(z)} lastHit={lastHit} />
-            ))}
+            {/* Head — rounded-rect face that hosts the zone grid */}
+            <View style={[styles.head, { borderRadius: headRadius }]}>
+              {ZONES.map((z) => (
+                <ZoneOverlay key={z.zone} zone={z.zone} box={zoneBox(z)} lastHit={lastHit} />
+              ))}
+            </View>
           </View>
-        </View>
+        </TourTarget>
       </View>
 
       {/* <View style={styles.counters}>

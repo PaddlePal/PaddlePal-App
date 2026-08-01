@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { signOut } from '@react-native-firebase/auth';
 import { auth } from '@/lib/firebase';
 import { useAuth } from '@/hooks/useAuth';
+import { TourTarget } from '@/components/tour/TourTarget';
 import { UserProfile } from '@/types';
 import { Colors } from '@/constants/colors';
 import { Typography } from '@/constants/typography';
@@ -45,17 +46,19 @@ export default function SettingsScreen() {
       </View>
 
       {/* ── Account ─────────────────────────────────────── */}
-      <View style={styles.card}>
-        <View style={styles.row}>
-          <Text style={styles.label}>NAME</Text>
-          <Text style={styles.value}>{name}</Text>
+      <TourTarget id="settings-account">
+        <View style={styles.card}>
+          <View style={styles.row}>
+            <Text style={styles.label}>NAME</Text>
+            <Text style={styles.value}>{name}</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.row}>
+            <Text style={styles.label}>EMAIL</Text>
+            <Text style={styles.value}>{email}</Text>
+          </View>
         </View>
-        <View style={styles.divider} />
-        <View style={styles.row}>
-          <Text style={styles.label}>EMAIL</Text>
-          <Text style={styles.value}>{email}</Text>
-        </View>
-      </View>
+      </TourTarget>
 
       {/* ── Sign Out ────────────────────────────────────── */}
       <Pressable

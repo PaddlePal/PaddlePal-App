@@ -13,11 +13,45 @@ import {
 import * as SplashScreen from 'expo-splash-screen';
 
 import { useAuth } from '@/hooks/useAuth';
-import { BluetoothProvider } from '@/hooks/useBluetooth';
+import { BluetoothProvider, useBluetooth } from '@/hooks/useBluetooth';
 import { Colors } from '@/constants/colors';
+import { UserProfile } from '@/types';
 
 // Keep splash visible while fonts + auth load
 SplashScreen.preventAutoHideAsync();
+
+/** Auth-Gate source name for the auto-connect suppression (see useBluetooth). */
+const AUTO_CONNECT_SOURCE = 'onboarding';
+
+/**
+ * Holds the BLE auto-connect loop off for the whole not-yet-onboarded window
+ * — sign-up through "Get Started" — using the same predicate the Auth Gate
+ * uses to redirect into onboarding.
+ *
+ * Without this, the paddle connects itself at app launch (the loop arms as
+ * soon as the adapter reports PoweredOn), long before a new user reaches the
+ * tour's Connect Paddle step, leaving that step nothing real to demonstrate.
+ * The tour holds the same gate — under its own source — for its own duration.
+ *
+ * Renders nothing; must live INSIDE <BluetoothProvider>, which RootLayout is
+ * the parent of. See memory-bank/PLAN-onboarding-tour.md (T1).
+ */
+function OnboardingAutoConnectGate({
+  user,
+  profile,
+}: {
+  user: unknown;
+  profile: UserProfile | null;
+}) {
+  const { setAutoConnectEnabled } = useBluetooth();
+
+  useEffect(() => {
+    const notOnboardedYet = !!user && (!profile || profile.onboarded === false);
+    setAutoConnectEnabled(!notOnboardedYet, AUTO_CONNECT_SOURCE);
+  }, [user, profile, setAutoConnectEnabled]);
+
+  return null;
+}
 
 /**
  * Root layout — acts as the strict Auth Gate.
@@ -78,6 +112,7 @@ export default function RootLayout() {
 
   return (
     <BluetoothProvider>
+      <OnboardingAutoConnectGate user={user} profile={profile} />
       <StatusBar style="light" />
       <Slot />
     </BluetoothProvider>

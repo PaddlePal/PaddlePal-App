@@ -92,6 +92,15 @@ interface BluetoothContextValue {
    */
   stopAutoConnectLoop: () => void;
   /**
+   * Arm/disarm auto-connect entirely — a longer-lived gate than the modal's
+   * stop/resume pair, used to keep the paddle from connecting itself during
+   * sign-up and the onboarding tour (see memory-bank/PLAN-onboarding-tour.md,
+   * T1). Suppression is reference-counted by `source` so two independent
+   * holders (the Auth Gate and the tour) can't release each other's hold; the
+   * loop only arms again once every source has released.
+   */
+  setAutoConnectEnabled: (enabled: boolean, source?: string) => void;
+  /**
    * Best-effort write of session-active state to the paddle's session-control
    * characteristic. No-ops silently when the characteristic isn't present on
    * the connected peripheral (today's firmware) — never throws.
@@ -205,6 +214,11 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
   const [connectedDevice, setConnectedDevice] = useState<DiscoveredDevice | null>(null);
   const [connectionPhase, setConnectionPhase] = useState<ConnectionPhase>('idle');
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Whether the PoweredOn effect is allowed to arm the auto-connect loop. State
+   * (not just a ref) because flipping it back to true has to re-run that effect.
+   */
+  const [autoConnectEnabled, setAutoConnectEnabledState] = useState(true);
 
   // Refs mirror the state the auto-connect loop and the BLE callbacks read
   // synchronously — React state updates are async and would race the loop.
@@ -223,6 +237,13 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
   const intentionalDisconnectRef = useRef(false);
   /** Guards against two auto-connect loops running at once. */
   const autoConnectLoopRef = useRef(false);
+  /**
+   * Every source currently holding auto-connect off (see
+   * `setAutoConnectEnabled`). Auto-connect is armed only while this is empty.
+   */
+  const autoConnectBlockersRef = useRef<Set<string>>(new Set());
+  /** Mirror of `autoConnectEnabled` for the loop's synchronous reads. */
+  const autoConnectEnabledRef = useRef(true);
   /**
    * Identity of the current loop run, bumped on every start and stop. A loop
    * that was stopped mid-`sleep` can otherwise wake up to find the flag set
@@ -509,6 +530,29 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
 
   // ── Auto-connect / auto-reconnect ────────────────────────────
 
+  /**
+   * Reference-counted gate on the whole auto-connect mechanism. Distinct from
+   * `stopAutoConnectLoop`, which is the scanner modal's short-lived pause —
+   * this is the "don't hunt at all right now" switch the onboarding flow holds
+   * from sign-up until the tour finishes.
+   */
+  const setAutoConnectEnabled = useCallback(
+    (enabled: boolean, source: string = 'default') => {
+      const blockers = autoConnectBlockersRef.current;
+      if (enabled) {
+        blockers.delete(source);
+      } else {
+        blockers.add(source);
+      }
+
+      const next = blockers.size === 0;
+      if (autoConnectEnabledRef.current === next) return;
+      autoConnectEnabledRef.current = next;
+      setAutoConnectEnabledState(next);
+    },
+    [],
+  );
+
   const stopAutoConnectLoop = useCallback(() => {
     autoConnectLoopRef.current = false;
     autoConnectGenerationRef.current += 1;
@@ -528,6 +572,10 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
     if (autoConnectLoopRef.current) return; // already hunting
     if (connectedDeviceRef.current) return; // nothing to do
     if (intentionalDisconnectRef.current) return; // user said stop
+    // Gated off (sign-up / onboarding tour). Checked here as well as in the
+    // arm effect because the scanner modal's `handleCloseScanner` resumes the
+    // loop unconditionally, which would otherwise slip past the gate.
+    if (!autoConnectEnabledRef.current) return;
     if (!managerRef.current) return;
     if (adapterStateRef.current !== BleState.PoweredOn) return;
 
@@ -545,6 +593,7 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
         isCurrentRun() &&
         !intentionalDisconnectRef.current &&
         !connectedDeviceRef.current &&
+        autoConnectEnabledRef.current &&
         managerRef.current &&
         adapterStateRef.current === BleState.PoweredOn
       ) {
@@ -579,16 +628,18 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
 
   // Trigger point 1: the adapter becomes usable → start hunting. Covers a cold
   // app launch with the paddle already advertising, and Bluetooth being
-  // switched back on mid-session.
+  // switched back on mid-session. The `autoConnectEnabled` gate is an extra AND
+  // condition here: while it's held off (sign-up → end of the onboarding tour)
+  // the loop never arms, and flipping it back on re-runs this effect.
   useEffect(() => {
-    if (adapterState === BleState.PoweredOn) {
+    if (adapterState === BleState.PoweredOn && autoConnectEnabled) {
       void runAutoConnectLoop();
       return;
     }
-    // Radio unusable — nothing to hunt with.
+    // Radio unusable, or auto-connect gated off — nothing to hunt with.
     stopAutoConnectLoop();
     if (!connectedDeviceRef.current) setConnectionPhase('idle');
-  }, [adapterState, runAutoConnectLoop, stopAutoConnectLoop]);
+  }, [adapterState, autoConnectEnabled, runAutoConnectLoop, stopAutoConnectLoop]);
 
   // ── Disconnect ───────────────────────────────────────────────
 
@@ -654,6 +705,7 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
       disconnect,
       runAutoConnectLoop,
       stopAutoConnectLoop,
+      setAutoConnectEnabled,
       writeSessionState,
       error,
     }),
@@ -669,6 +721,7 @@ export function BluetoothProvider({ children }: { children: React.ReactNode }) {
       disconnect,
       runAutoConnectLoop,
       stopAutoConnectLoop,
+      setAutoConnectEnabled,
       writeSessionState,
       error,
     ],

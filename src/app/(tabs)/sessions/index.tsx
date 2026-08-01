@@ -11,6 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { SymbolView } from 'expo-symbols';
 import { useRouter } from 'expo-router';
 
+import { TourTarget } from '@/components/tour/TourTarget';
 import { useSessions } from '@/hooks/useSessions';
 import { formatSessionDate, formatDuration } from '@/lib/format';
 import { Session } from '@/types';
@@ -45,36 +46,38 @@ export default function SessionsScreen() {
         </Pressable>
       </View>
 
-      {loading ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={Colors.primary} />
-        </View>
-      ) : (
-        <FlatList
-          data={sessions}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.listContent}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={refresh}
-              tintColor={Colors.primary}
-              colors={[Colors.primary]}
-            />
-          }
-          ListEmptyComponent={
-            <View style={styles.center}>
-              <Text style={styles.empty}>No sessions recorded yet</Text>
-            </View>
-          }
-          renderItem={({ item }) => (
-            <SessionCard
-              session={item}
-              onPress={() => router.push(`/sessions/${item.id}`)}
-            />
-          )}
-        />
-      )}
+      <TourTarget id="history-list" style={styles.listWrap}>
+        {loading ? (
+          <View style={styles.center}>
+            <ActivityIndicator color={Colors.primary} />
+          </View>
+        ) : (
+          <FlatList
+            data={sessions}
+            keyExtractor={(item) => item.id}
+            contentContainerStyle={styles.listContent}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={refresh}
+                tintColor={Colors.primary}
+                colors={[Colors.primary]}
+              />
+            }
+            ListEmptyComponent={
+              <View style={styles.center}>
+                <Text style={styles.empty}>No sessions recorded yet</Text>
+              </View>
+            }
+            renderItem={({ item }) => (
+              <SessionCard
+                session={item}
+                onPress={() => router.push(`/sessions/${item.id}`)}
+              />
+            )}
+          />
+        )}
+      </TourTarget>
     </SafeAreaView>
   );
 }
@@ -135,6 +138,10 @@ const styles = StyleSheet.create({
   },
   refreshButtonPressed: {
     opacity: 0.6,
+  },
+  // Wrapper for the tour target — takes the same remaining space the list did.
+  listWrap: {
+    flex: 1,
   },
   center: {
     flex: 1,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -11,13 +11,17 @@ import {
 } from 'react-native';
 import { State as BleState } from 'react-native-ble-plx';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useLocalSearchParams } from 'expo-router';
 
 import { Colors } from '@/constants/colors';
 import { Radius, Spacing } from '@/constants/spacing';
 import { Typography } from '@/constants/typography';
+import { TOUR_PARAM_VALUE } from '@/constants/tourSteps';
 import { useAuth } from '@/hooks/useAuth';
 import { isConnectedToPaddle, useBluetooth } from '@/hooks/useBluetooth';
 import { useSession } from '@/hooks/useSession';
+import { useTour } from '@/hooks/useTour';
+import { TourTarget } from '@/components/tour/TourTarget';
 
 // ── Helpers ────────────────────────────────────────────────────────
 function rssiToSignalBars(rssi: number | null): number {
@@ -78,8 +82,37 @@ export default function DashboardScreen() {
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
+  // ── First-run tour trigger ─────────────────────────────────────
+  // Only the welcome screen's post-onboarding redirect carries `tour=1`, so a
+  // normal relaunch (Auth Gate → /(tabs)/dashboard, no param) never replays it.
+  // No AsyncStorage, no extra Firestore field.
+  const { tour: tourParam } = useLocalSearchParams<{ tour?: string }>();
+  const { start: startTour, notifyAction } = useTour();
+
+  // useLayoutEffect, not useEffect: this runs before the first paint, so the
+  // user never sees an undimmed, interactive dashboard flash behind the tour.
+  useLayoutEffect(() => {
+    if (tourParam === TOUR_PARAM_VALUE) startTour();
+  }, [tourParam, startTour]);
+
   const isConnected = isConnectedToPaddle(connectedDevice);
   const isSessionActive = sessionState === 'active';
+
+  // The tour's start/end-session steps advance on the real thing happening.
+  // This screen owns the session lifecycle (`useSession` is per-instance state,
+  // not a context), so the report has to come from here. `notifyAction` is
+  // identity-stable and ignores anything the current step isn't waiting on.
+  useEffect(() => {
+    if (isSessionActive) {
+      notifyAction('session-start');
+      return;
+    }
+    // Wait out `busy` on the way down: endSession flips the state to idle
+    // immediately but the Firestore write lands a moment later, and the tour's
+    // next stop is History — which reads once on mount and would miss the
+    // session that was just recorded.
+    if (!sessionBusy) notifyAction('session-end');
+  }, [isSessionActive, sessionBusy, notifyAction]);
 
   // "Working on it" — the auto-connect loop or a manual scan is in flight, so
   // the card shows a live third state instead of a flat "Not Connected".
@@ -196,127 +229,135 @@ export default function DashboardScreen() {
       {/* ── Status Cards ───────────────────────────────── */}
       <View style={styles.cards}>
         {/* Paddle Status */}
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <Animated.View
+        <TourTarget id="paddle-status">
+          <View style={styles.card}>
+            <View style={styles.cardHeader}>
+              <Animated.View
+                style={[
+                  styles.statusDot,
+                  isConnected
+                    ? styles.statusOnline
+                    : isSeeking
+                      ? styles.statusSeeking
+                      : styles.statusOffline,
+                  isSeeking && { opacity: dotPulse },
+                ]}
+              />
+              <Text style={styles.cardLabel}>PADDLE SENSOR</Text>
+            </View>
+            <Text
               style={[
-                styles.statusDot,
-                isConnected
-                  ? styles.statusOnline
-                  : isSeeking
-                    ? styles.statusSeeking
-                    : styles.statusOffline,
-                isSeeking && { opacity: dotPulse },
+                styles.cardValue,
+                isConnected && styles.cardValueConnected,
+                isSeeking && styles.cardValueSeeking,
               ]}
-            />
-            <Text style={styles.cardLabel}>PADDLE SENSOR</Text>
+            >
+              {paddleStatus}
+            </Text>
+            <Text style={styles.cardHint}>
+              {isConnected
+                ? connectedDevice?.name ?? 'PaddlePal Device'
+                : isSeeking
+                  ? 'Looking for your paddle…'
+                  : 'Pair your PaddlePal to start tracking'}
+            </Text>
           </View>
-          <Text
-            style={[
-              styles.cardValue,
-              isConnected && styles.cardValueConnected,
-              isSeeking && styles.cardValueSeeking,
-            ]}
-          >
-            {paddleStatus}
-          </Text>
-          <Text style={styles.cardHint}>
-            {isConnected
-              ? connectedDevice?.name ?? 'PaddlePal Device'
-              : isSeeking
-                ? 'Looking for your paddle…'
-                : 'Pair your PaddlePal to start tracking'}
-          </Text>
-        </View>
+        </TourTarget>
 
         {/* Session Control */}
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <View
-              style={[
-                styles.statusDot,
-                isSessionActive ? styles.statusOnline : styles.statusOffline,
-              ]}
-            />
-            <Text style={styles.cardLabel}>SESSION</Text>
-          </View>
-          <Text
-            style={[
-              styles.cardValue,
-              isSessionActive && styles.cardValueConnected,
-            ]}
-          >
-            {isSessionActive ? formatElapsed(elapsedSec) : 'Ready'}
-          </Text>
-          <Text style={styles.cardHint}>
-            {isSessionActive
-              ? `Recording • ${hitCount} ${hitCount === 1 ? 'shot' : 'shots'}`
-              : isConnected
-                ? 'Start a session to record your shots'
-                : 'Connect your paddle to start a session'}
-          </Text>
-
-          <Pressable
-            style={({ pressed }) => [
-              styles.sessionButton,
-              isSessionActive
-                ? styles.endSessionButton
-                : styles.startSessionButton,
-              !isSessionActive &&
-              (!isConnected || sessionBusy) &&
-              styles.sessionButtonDisabled,
-              pressed && styles.buttonPressed,
-            ]}
-            onPress={handleToggleSession}
-            disabled={sessionBusy || (!isSessionActive && !isConnected)}
-          >
-            {sessionBusy ? (
-              <ActivityIndicator
-                size="small"
-                color={isSessionActive ? Colors.text : Colors.onPrimary}
-              />
-            ) : (
-              <Text
+        <TourTarget id="session-card">
+          <View style={styles.card}>
+            <View style={styles.cardHeader}>
+              <View
                 style={[
-                  isSessionActive
-                    ? styles.endSessionButtonText
-                    : styles.startSessionButtonText,
-                  !isSessionActive &&
-                  !isConnected &&
-                  styles.sessionButtonTextDisabled,
+                  styles.statusDot,
+                  isSessionActive ? styles.statusOnline : styles.statusOffline,
                 ]}
-              >
-                {isSessionActive ? 'End Session' : 'Start Session'}
-              </Text>
-            )}
-          </Pressable>
-        </View>
+              />
+              <Text style={styles.cardLabel}>SESSION</Text>
+            </View>
+            <Text
+              style={[
+                styles.cardValue,
+                isSessionActive && styles.cardValueConnected,
+              ]}
+            >
+              {isSessionActive ? formatElapsed(elapsedSec) : 'Ready'}
+            </Text>
+            <Text style={styles.cardHint}>
+              {isSessionActive
+                ? `Recording • ${hitCount} ${hitCount === 1 ? 'shot' : 'shots'}`
+                : isConnected
+                  ? 'Start a session to record your shots'
+                  : 'Connect your paddle to start a session'}
+            </Text>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.sessionButton,
+                isSessionActive
+                  ? styles.endSessionButton
+                  : styles.startSessionButton,
+                !isSessionActive &&
+                (!isConnected || sessionBusy) &&
+                styles.sessionButtonDisabled,
+                pressed && styles.buttonPressed,
+              ]}
+              onPress={handleToggleSession}
+              disabled={sessionBusy || (!isSessionActive && !isConnected)}
+            >
+              {sessionBusy ? (
+                <ActivityIndicator
+                  size="small"
+                  color={isSessionActive ? Colors.text : Colors.onPrimary}
+                />
+              ) : (
+                <Text
+                  style={[
+                    isSessionActive
+                      ? styles.endSessionButtonText
+                      : styles.startSessionButtonText,
+                    !isSessionActive &&
+                    !isConnected &&
+                    styles.sessionButtonTextDisabled,
+                  ]}
+                >
+                  {isSessionActive ? 'End Session' : 'Start Session'}
+                </Text>
+              )}
+            </Pressable>
+          </View>
+        </TourTarget>
       </View>
 
       {/* ── Quick Actions ──────────────────────────────── */}
       <View style={styles.quickActions}>
-        {isConnected ? (
-          <Pressable
-            style={({ pressed }) => [
-              styles.disconnectButton,
-              pressed && styles.buttonPressed,
-            ]}
-            onPress={handleDisconnect}
-          >
-            <Text style={styles.disconnectButtonText}>Disconnect Paddle</Text>
-          </Pressable>
-        ) : (
-          <Pressable
-            style={({ pressed }) => [
-              styles.connectButton,
-              pressed && styles.buttonPressed,
-            ]}
-            onPress={handleOpenScanner}
-          >
-            <View style={styles.pulseRing} />
-            <Text style={styles.connectButtonText}>Connect Paddle</Text>
-          </Pressable>
-        )}
+        {/* Wraps both states: the tour spotlights Connect Paddle, and the
+            button becomes Disconnect Paddle the moment the user pairs. */}
+        <TourTarget id="connect-paddle">
+          {isConnected ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.disconnectButton,
+                pressed && styles.buttonPressed,
+              ]}
+              onPress={handleDisconnect}
+            >
+              <Text style={styles.disconnectButtonText}>Disconnect Paddle</Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              style={({ pressed }) => [
+                styles.connectButton,
+                pressed && styles.buttonPressed,
+              ]}
+              onPress={handleOpenScanner}
+            >
+              <View style={styles.pulseRing} />
+              <Text style={styles.connectButtonText}>Connect Paddle</Text>
+            </Pressable>
+          )}
+        </TourTarget>
       </View>
 
       {/* ── Bluetooth Scanner Modal ────────────────────── */}
