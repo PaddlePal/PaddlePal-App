@@ -9,7 +9,7 @@ import { useLocalSearchParams } from 'expo-router';
 
 import { useSession } from '@/hooks/useSessions';
 import { formatSessionDate, formatDuration } from '@/lib/format';
-import { PowerLevel, ZoneStat } from '@/types';
+import { PowerLevel, ShotType } from '@/types';
 import { Colors } from '@/constants/colors';
 import { Typography } from '@/constants/typography';
 import { Spacing, Radius } from '@/constants/spacing';
@@ -21,6 +21,13 @@ const ZONE_LABELS: Record<number, string> = {
   3: 'Z3',
   4: 'Z4',
   5: 'Z5',
+};
+const SHOT_TYPE_LABELS: Record<ShotType, string> = {
+  drive: 'Drive',
+  drop: 'Drop',
+  dink: 'Dink',
+  overhead: 'Overhead',
+  rally: 'Rally',
 };
 const CHART_HEIGHT = 130;
 
@@ -86,7 +93,25 @@ export default function SessionDetailScreen() {
           {/* ── Shots per zone ──────────────────────────── */}
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Shots per Zone</Text>
-            <ZoneBarChart zones={metrics.zones} />
+            <BarChart
+              data={metrics.zones.map((z) => ({
+                key: String(z.zone),
+                label: ZONE_LABELS[z.zone] ?? `Z${z.zone}`,
+                value: z.shots,
+              }))}
+            />
+          </View>
+
+          {/* ── Shots by type ───────────────────────────── */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Shots by Type</Text>
+            <BarChart
+              data={metrics.shotTypes.map((s) => ({
+                key: s.type,
+                label: SHOT_TYPE_LABELS[s.type] ?? s.type,
+                value: s.shots,
+              }))}
+            />
           </View>
         </>
       )}
@@ -124,19 +149,37 @@ function PowerMeter({ level }: { level: PowerLevel }) {
   );
 }
 
-/** Simple dependency-free vertical bar chart of shots per zone. */
-function ZoneBarChart({ zones }: { zones: ZoneStat[] }) {
-  const max = Math.max(...zones.map((z) => z.shots), 1);
+interface BarDatum {
+  key: string;
+  label: string;
+  value: number;
+}
+
+/**
+ * Simple dependency-free vertical bar chart. Shared by the zone and shot-type
+ * breakdowns so the two always look identical — bars are scaled against the
+ * largest value in their own chart, and a zero value still renders a 2px stub
+ * rather than disappearing.
+ */
+function BarChart({ data }: { data: BarDatum[] }) {
+  const max = Math.max(...data.map((d) => d.value), 1);
   return (
     <View style={styles.chart}>
-      {zones.map((z) => {
-        const height = Math.max(Math.round((z.shots / max) * CHART_HEIGHT), 2);
+      {data.map((d) => {
+        const height = Math.max(Math.round((d.value / max) * CHART_HEIGHT), 2);
         return (
-          <View key={z.zone} style={styles.barCol}>
-            <Text style={styles.barValue}>{z.shots}</Text>
+          <View key={d.key} style={styles.barCol}>
+            <Text style={styles.barValue}>{d.value}</Text>
             <View style={[styles.bar, { height }]} />
-            <Text style={styles.barLabel}>
-              {ZONE_LABELS[z.zone] ?? `Z${z.zone}`}
+            {/* Shrink-to-fit keeps the longest label ("Overhead") on one line
+                in a 5-column chart without changing the style for short ones. */}
+            <Text
+              style={styles.barLabel}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.7}
+            >
+              {d.label}
             </Text>
           </View>
         );

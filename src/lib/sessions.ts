@@ -14,6 +14,7 @@ import {
 
 import { firestore } from './firebase';
 import { computeSessionMetrics } from './sessionMetrics';
+import { SHOT_TYPES } from './shotClassifier';
 import { RawHit, Session, SessionMetrics, SessionStatus } from '@/types';
 
 /**
@@ -29,7 +30,22 @@ import { RawHit, Session, SessionMetrics, SessionStatus } from '@/types';
 
 const SESSIONS = 'sessions';
 
-/** Shape of a `sessions/{id}` document as stored in Firestore. */
+/**
+ * Shape of a `sessions/{id}` document as stored in Firestore.
+ *
+ * `rawHits` entries may each carry an `imuWindow` array (the ~1s of IMU samples
+ * before that hit — see `useImuBuffer`). That is legal despite Firestore's
+ * no-nested-arrays rule: the restriction is on an array *directly* holding
+ * another array, and here the inner array sits inside a map. No subcollection,
+ * no separate write.
+ *
+ * ⚠️ Doc-size headroom: an `imuWindow` costs ~2.2KB per hit once Firestore's
+ * per-map/per-field overhead is counted (~109 bytes per sample × ~20 samples),
+ * not the ~240 bytes the raw wire format suggests. That puts the 1MB
+ * single-document ceiling at roughly 450 hits in one session. See
+ * memory-bank/progress.md (2026-08-01, IMU plumbing) before assuming a long
+ * session fits.
+ */
 interface SessionDoc {
   userId: string;
   status: SessionStatus;
@@ -48,6 +64,21 @@ function tsToIso(value: FirebaseFirestoreTypes.Timestamp | null): string {
   return '';
 }
 
+/**
+ * Sessions recorded before shot classification existed have `metrics` without a
+ * `shotTypes` field. Zero-fill it on read so `SessionMetrics.shotTypes` can stay
+ * non-optional for every consumer and the chart renders five empty bars instead
+ * of crashing on an undefined array.
+ */
+function normalizeMetrics(metrics: SessionMetrics | null): SessionMetrics | null {
+  if (!metrics) return null;
+  if (Array.isArray(metrics.shotTypes)) return metrics;
+  return {
+    ...metrics,
+    shotTypes: SHOT_TYPES.map((type) => ({ type, shots: 0 })),
+  };
+}
+
 /** Map a stored document to the `Session` type the screens consume. */
 function mapSession(id: string, data: SessionDoc): Session {
   return {
@@ -57,7 +88,7 @@ function mapSession(id: string, data: SessionDoc): Session {
     startedAt: tsToIso(data.startedAt),
     endedAt: tsToIso(data.endedAt),
     durationSec: data.durationSec ?? 0,
-    metrics: data.metrics ?? null,
+    metrics: normalizeMetrics(data.metrics ?? null),
   };
 }
 
@@ -94,7 +125,7 @@ export async function endSession(
   startedAtMs: number,
 ): Promise<void> {
   const durationSec = Math.round((Date.now() - startedAtMs) / 1000);
-  const metrics = computeSessionMetrics(rawHits);
+  const metrics = computeSessionMetrics(rawHits, startedAtMs);
 
   await updateDoc(doc(firestore, SESSIONS, sessionId), {
     status: 'complete',

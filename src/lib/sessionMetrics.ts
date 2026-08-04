@@ -1,4 +1,13 @@
-import { PowerLevel, RawHit, SessionMetrics, ZoneId, ZoneStat } from '@/types';
+import {
+  PowerLevel,
+  RawHit,
+  SessionMetrics,
+  ShotType,
+  ShotTypeStat,
+  ZoneId,
+  ZoneStat,
+} from '@/types';
+import { classifyShot, SHOT_TYPES } from './shotClassifier';
 
 /**
  * Pure session-metrics computation.
@@ -21,9 +30,9 @@ const ALL_ZONES: readonly ZoneId[] = [1, 2, 3, 4, 5];
  * are finalized on hardware.
  */
 const POWER_CUTOFFS: readonly { belowOrEqual: number; level: PowerLevel }[] = [
-  { belowOrEqual: 255, level: 'low' },
-  { belowOrEqual: 511, level: 'medium' },
-  { belowOrEqual: 767, level: 'high' },
+  { belowOrEqual: 500, level: 'low' },
+  { belowOrEqual: 799, level: 'medium' },
+  { belowOrEqual: 900, level: 'high' },
   { belowOrEqual: 1023, level: 'super' },
 ];
 
@@ -44,15 +53,32 @@ function computeAvgPower(rawHits: RawHit[]): PowerLevel {
  * Compute the metrics shown on the session detail screen from the raw hit
  * buffer.
  *
- * `zones` always contains exactly 5 entries (zones 1–5), zero-filled for any
- * zone with no hits — the ZoneBarChart in sessions/[id].tsx maps the array
- * directly with no zero-padding of its own, so a short array would silently
- * render fewer bars.
+ * `zones` and `shotTypes` always contain exactly 5 entries each, zero-filled
+ * for any bucket with no hits — the bar charts in sessions/[id].tsx map those
+ * arrays directly with no zero-padding of their own, so a short array would
+ * silently render fewer bars.
+ *
+ * `startedAtMs` is the session's client start time, the same value `useSession`
+ * subtracts to produce each hit's `offsetMs`. Adding it back gives the hit's
+ * absolute timestamp, which is the clock its `imuWindow` samples are keyed on —
+ * the classifier needs both on the same clock to measure a windup.
  */
-export function computeSessionMetrics(rawHits: RawHit[]): SessionMetrics {
+export function computeSessionMetrics(
+  rawHits: RawHit[],
+  startedAtMs: number,
+): SessionMetrics {
   const counts: Record<ZoneId, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  const shotCounts: Record<ShotType, number> = {
+    drive: 0,
+    drop: 0,
+    dink: 0,
+    overhead: 0,
+    rally: 0,
+  };
+
   for (const hit of rawHits) {
     if (hit.zone in counts) counts[hit.zone] += 1;
+    shotCounts[classifyShot(hit, startedAtMs + hit.offsetMs)] += 1;
   }
 
   const zones: ZoneStat[] = ALL_ZONES.map((zone) => ({
@@ -60,9 +86,15 @@ export function computeSessionMetrics(rawHits: RawHit[]): SessionMetrics {
     shots: counts[zone],
   }));
 
+  const shotTypes: ShotTypeStat[] = SHOT_TYPES.map((type) => ({
+    type,
+    shots: shotCounts[type],
+  }));
+
   return {
     totalShots: rawHits.length,
     avgPower: computeAvgPower(rawHits),
     zones,
+    shotTypes,
   };
 }

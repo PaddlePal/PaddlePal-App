@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 
 import { useAuth } from '@/hooks/useAuth';
 import { useBluetooth } from '@/hooks/useBluetooth';
+import { useImuBuffer } from '@/hooks/useImuBuffer';
 import { usePaddleData, PaddleHit } from '@/hooks/usePaddleData';
 import {
   startSession as createSessionDoc,
@@ -51,17 +52,38 @@ export function useSession(): UseSessionResult {
   const hitsRef = useRef<RawHit[]>([]);
   const busyRef = useRef(false);
 
-  // Buffer every decoded hit while active. Stable identity (empty deps) so
-  // usePaddleData never resubscribes the BLE monitor because of this callback.
-  const bufferHit = useCallback((hit: PaddleHit) => {
-    if (stateRef.current !== 'active') return;
-    hitsRef.current.push({
-      zone: hit.zone,
-      payload: hit.payload,
-      offsetMs: hit.ts - startedAtMsRef.current,
-    });
-    setHitCount(hitsRef.current.length);
-  }, []);
+  // Trailing IMU window for each hit. This hook owns that subscription's
+  // lifecycle: it starts when `sessionState` flips to 'active' (in
+  // startSession) and stops when it flips back (first thing endSession does),
+  // so nothing is subscribed — and per BLE notify semantics nothing is
+  // transmitted — outside a session.
+  const { getWindow } = useImuBuffer({ active: sessionState === 'active' });
+
+  // Buffer every decoded hit while active. Stable identity (getWindow is
+  // itself identity-stable) so usePaddleData never resubscribes the BLE monitor
+  // because of this callback.
+  const bufferHit = useCallback(
+    (hit: PaddleHit) => {
+      if (stateRef.current !== 'active') return;
+
+      const rawHit: RawHit = {
+        zone: hit.zone,
+        payload: hit.payload,
+        offsetMs: hit.ts - startedAtMsRef.current,
+      };
+
+      // Cheap array snapshot on the hot BLE path — no classification here. That
+      // runs once per session, on-device, inside endSession's metrics pass
+      // (future task). Key omitted rather than set to undefined when empty:
+      // Firestore rejects explicit undefined values.
+      const imuWindow = getWindow(hit.ts);
+      if (imuWindow.length > 0) rawHit.imuWindow = imuWindow;
+
+      hitsRef.current.push(rawHit);
+      setHitCount(hitsRef.current.length);
+    },
+    [getWindow],
+  );
 
   usePaddleData({ onHit: bufferHit });
 
