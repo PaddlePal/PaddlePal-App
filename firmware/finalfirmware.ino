@@ -186,30 +186,31 @@ void setup() {
   pinMode(LOAD_SWITCH_EN, OUTPUT);
   digitalWrite(LOAD_SWITCH_EN, HIGH);
 
-  pinMode(LED_BUILTIN, OUTPUT);
-
   pinMode(MOTOR_OUTPUT, OUTPUT);
   digitalWrite(MOTOR_OUTPUT, LOW);
 
   if (!IMU.begin()) {
     while (1) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(200);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(200);
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(200);
-      digitalWrite(LED_BUILTIN, LOW);
+      digitalWrite(MOTOR_OUTPUT, HIGH);
+      delay(250);
+      digitalWrite(MOTOR_OUTPUT, LOW);
       delay(2000);
     }
   }
 
-  if (!BLE.begin()) {
+  if (!BLE.begin()) { // 3 pulses
     while (1) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(700);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(700);
+      digitalWrite(MOTOR_OUTPUT, HIGH);
+      delay(250);
+      digitalWrite(MOTOR_OUTPUT, LOW);
+      delay(250);
+      digitalWrite(MOTOR_OUTPUT, HIGH);
+      delay(250);
+      digitalWrite(MOTOR_OUTPUT, LOW);
+      delay(250);
+      digitalWrite(MOTOR_OUTPUT, HIGH);
+      delay(250);
+      digitalWrite(MOTOR_OUTPUT, LOW);
       delay(2000);
     }
   }
@@ -231,17 +232,13 @@ void setup() {
 
   if (!BLE.advertise()) {
     while (1) {
-      digitalWrite(LED_BUILTIN, HIGH);
+      digitalWrite(MOTOR_OUTPUT, HIGH);
       delay(200);
-      digitalWrite(LED_BUILTIN, LOW);
+      digitalWrite(MOTOR_OUTPUT, LOW);
       delay(200);
-      digitalWrite(LED_BUILTIN, HIGH);
+      digitalWrite(MOTOR_OUTPUT, HIGH);
       delay(200);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(200);
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(200);
-      digitalWrite(LED_BUILTIN, LOW);
+      digitalWrite(MOTOR_OUTPUT, LOW);
       delay(2000);
     }
   }
