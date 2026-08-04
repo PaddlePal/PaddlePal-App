@@ -23,10 +23,11 @@
 // core's pin table), NOT RP2040 GPIO numbers. On this board D3=GPIO15,
 // D6=GPIO18, D7=GPIO19 — passing the GPIO number drives the wrong pin
 // (15=A1, 18=A4/SDA, 19=A5/SCL). Use the D-number.
-#define MOTOR_OUTPUT 6   // D6 — haptic feedback motor
-#define LOAD_SWITCH_EN 7 // D7 — power-rail enable; asserted HIGH at boot and
-                         // never driven LOW (no power buttons on this board —
-                         // see memory-bank/planB-design-notes.md)
+#define MOTOR_OUTPUT 6 // D6 — haptic feedback motor
+#define LOAD_SWITCH_EN                                                         \
+  7 // D7 — power-rail enable; asserted HIGH at boot and
+    // never driven LOW (no power buttons on this board —
+    // see memory-bank/planB-design-notes.md)
 
 bool motorActive = false;
 unsigned long motorStartTime = 0;
@@ -51,8 +52,8 @@ const unsigned long MOTOR_STARTUP_MS = 3000;
 #define WATCHDOG_TIMEOUT_MS 4000
 #define WATCHDOG_CHECK_INTERVAL_MS 500
 
-#define ACCEL_THRESHOLD 100.05f
-#define GYRO_THRESHOLD 100.0f
+#define ACCEL_THRESHOLD 0.05f
+#define GYRO_THRESHOLD 1.0f
 
 // BLE identity — these two values MUST stay in sync with the app's
 // PADDLE_FILTER in src/hooks/useBluetooth.tsx (matches on name OR service
@@ -61,18 +62,51 @@ const unsigned long MOTOR_STARTUP_MS = 3000;
 #define PADDLE_SERVICE_UUID "9590ad2d-fd81-4688-9d3b-65ac36caca3a"
 
 BLEService paddleService(PADDLE_SERVICE_UUID);
-// Minimal read-only placeholder so the advertised service isn't empty on
-// connect. Real FSR/IMU telemetry characteristics are a follow-up task, not
-// this pass.
+// Minimal read-only device-info characteristic, originally added so the
+// advertised service wasn't empty on connect. The real telemetry streams are
+// the two notify characteristics below.
 BLEStringCharacteristic paddleInfo("9590ad2e-fd81-4688-9d3b-65ac36caca3a",
                                    BLERead, 32);
 // Live FSR hit stream: a 4-byte notify carrying the raw inter-core FIFO word
 // (zone in upper 16 bits, FSR payload in lower 16 — see sendFSRPacket()). Sent
 // little-endian on the wire (RP2040). Decoded by the app in
-// src/hooks/usePaddleData.ts with identical unpacking. UUID sequence:
-// ...2d = service, ...2e = paddleInfo, ...2f = fsrData.
+// src/hooks/usePaddleData.ts with identical unpacking.
 BLECharacteristic fsrData("9590ad2f-fd81-4688-9d3b-65ac36caca3a",
                           BLERead | BLENotify, 4);
+// Live IMU stream: a 12-byte notify carrying six int16s, little-endian, in the
+// order ax, ay, az, gx, gy, gz (see loop()). Written every ~50ms tick,
+// unconditionally and forever — the firmware has no concept of a session, so
+// the APP decides whether anyone is listening by subscribing only while it is
+// recording. Nothing is transmitted when no central has enabled notifications.
+// Decoded by the app in src/hooks/useImuBuffer.ts. UUID sequence:
+// ...2d = service, ...2e = paddleInfo, ...2f = fsrData, ...30 = reserved for
+// session control (app-side stub today), ...31 = imuData.
+BLECharacteristic imuData("9590ad31-fd81-4688-9d3b-65ac36caca3a",
+                          BLERead | BLENotify, 12);
+
+// Fixed-point scale factors for the IMU notify payload above, in counts per
+// unit. Arduino_LSM6DSOX configures the sensor at +/-4 g and +/-2000 dps
+// (CTRL1_XL 0x4A / CTRL2_G 0x4C) and returns g and deg/s, so at these scales a
+// full-scale reading lands at +/-16384 and +/-32000 counts respectively —
+// inside int16 either way, so a real reading can never clip:
+//   accel: 4096 counts per g    -> 0.244 mg per count (sensor LSB: 0.122 mg)
+//   gyro:  16 counts per deg/s  -> 0.0625 deg/s per count (sensor LSB: 0.061)
+// The app dequantizes with the exact inverse of these two numbers. Change one
+// here and src/hooks/useImuBuffer.ts MUST change to match — a mismatch corrupts
+// every sample silently, with no error anywhere.
+#define IMU_ACCEL_SCALE 4096.0f
+#define IMU_GYRO_SCALE 16.0f
+
+// Float -> int16 for the payload above. The clamp can't trigger at the scales
+// documented there; it's here so a future rescale can't silently wrap.
+int16_t quantizeImu(float value, float scale) {
+  float scaled = value * scale;
+  if (scaled > 32767.0f)
+    return 32767;
+  if (scaled < -32768.0f)
+    return -32768;
+  return (int16_t)lroundf(scaled);
+}
 
 // Helper function to pack data and send to Core 0 via FIFO
 // Zone number goes into upper 16 bits, FSR value goes into lower 16 bits
@@ -111,7 +145,8 @@ volatile uint32_t g_core1Heartbeat = 0;
 // FSR_RELEASE_THRESHOLD (or the FSR_MAX_WINDOW_US ceiling fires). Zones 3/4
 // share one group window instead of sending individually — "zone 5" means A2
 // and A3 were both open at some point during that window; see the
-// classification logic below. Design rationale: memory-bank/planB-design-notes.md.
+// classification logic below. Design rationale:
+// memory-bank/planB-design-notes.md.
 void core1_entry() {
   adc_init();
   adc_gpio_init(29); // A0 / zone1
@@ -318,6 +353,7 @@ void setup() {
   BLE.setDeviceName(PADDLE_BLE_NAME);
   paddleService.addCharacteristic(paddleInfo);
   paddleService.addCharacteristic(fsrData);
+  paddleService.addCharacteristic(imuData);
   paddleInfo.writeValue(PADDLE_BLE_NAME);
   BLE.addService(paddleService);
 
@@ -419,6 +455,20 @@ void loop() {
   if (IMU.gyroscopeAvailable()) {
     IMU.readGyroscope(gx, gy, gz);
   }
+
+  // Mirror this tick's IMU reading out as a 12-byte notify. Deliberately
+  // OUTSIDE the imuActive/gotHit gate below — that gate only ever controlled
+  // the Serial print, and the app needs the quiet samples too (a still paddle
+  // right before a hit is itself a signal for shot classification). Unfiltered
+  // and unconditional: no threshold, no session state, every tick. At the
+  // sensor's 104Hz ODR a reading is essentially always available at this 20Hz
+  // cadence; on the rare tick where it isn't, the locals above are still 0 and
+  // the sample decodes as all-zeros rather than as stale data.
+  int16_t imuPacket[6] = {
+      quantizeImu(ax, IMU_ACCEL_SCALE), quantizeImu(ay, IMU_ACCEL_SCALE),
+      quantizeImu(az, IMU_ACCEL_SCALE), quantizeImu(gx, IMU_GYRO_SCALE),
+      quantizeImu(gy, IMU_GYRO_SCALE),  quantizeImu(gz, IMU_GYRO_SCALE)};
+  imuData.writeValue((uint8_t *)imuPacket, sizeof(imuPacket));
 
   // Check if any FSR data is waiting in the FIFO queue
   bool gotHit = multicore_fifo_rvalid();
