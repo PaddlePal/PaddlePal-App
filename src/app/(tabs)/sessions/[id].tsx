@@ -1,18 +1,23 @@
+import { useState } from 'react';
 import {
   ActivityIndicator,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { SymbolView } from 'expo-symbols';
 import { useLocalSearchParams } from 'expo-router';
 
 import { useSession } from '@/hooks/useSessions';
 import { formatSessionDate, formatDuration } from '@/lib/format';
-import { PowerLevel, ShotType } from '@/types';
+import { SHOT_TYPES } from '@/lib/shotClassifier';
+import { PowerLevel } from '@/types';
 import { Colors } from '@/constants/colors';
 import { Typography } from '@/constants/typography';
 import { Spacing, Radius } from '@/constants/spacing';
+import { SHOT_TYPE_GUIDE, SHOT_TYPE_LABELS } from '@/constants/shotTypes';
 
 const POWER_LEVELS: PowerLevel[] = ['low', 'medium', 'high', 'super'];
 const ZONE_LABELS: Record<number, string> = {
@@ -21,13 +26,6 @@ const ZONE_LABELS: Record<number, string> = {
   3: 'Z3',
   4: 'Z4',
   5: 'Z5',
-};
-const SHOT_TYPE_LABELS: Record<ShotType, string> = {
-  drive: 'Drive',
-  drop: 'Drop',
-  dink: 'Dink',
-  overhead: 'Overhead',
-  rally: 'Rally',
 };
 const CHART_HEIGHT = 130;
 
@@ -112,10 +110,65 @@ export default function SessionDetailScreen() {
                 value: s.shots,
               }))}
             />
+            <ShotTypeGuide />
           </View>
         </>
       )}
     </ScrollView>
+  );
+}
+
+/**
+ * Collapsed-by-default explainer for the five shot-type buckets. The copy is
+ * static reference material (`constants/shotTypes.ts`) — identical on every
+ * session — so it stays folded away under the chart until asked for, but the
+ * header is tinted and chevroned so it reads as tappable rather than as a
+ * caption. Walks `SHOT_TYPES` so the list order always matches the bars.
+ */
+function ShotTypeGuide() {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <View style={styles.guide}>
+      <Pressable
+        onPress={() => setExpanded((prev) => !prev)}
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        accessibilityLabel="What do these shot types mean?"
+        style={({ pressed }) => [
+          styles.guideHeader,
+          pressed && styles.guidePressed,
+        ]}
+      >
+        <Text style={styles.guideHeaderText}>
+          What do these shot types mean?
+        </Text>
+        <SymbolView
+          name={expanded ? 'chevron.up' : 'chevron.down'}
+          tintColor={Colors.primary}
+          size={14}
+        />
+      </Pressable>
+
+      {expanded && (
+        <View style={styles.guideBody}>
+          {SHOT_TYPES.map((type) => (
+            <View key={type} style={styles.guideItem}>
+              <Text style={styles.guideItemTitle}>
+                {SHOT_TYPE_LABELS[type]}
+              </Text>
+              <Text style={styles.guideItemText}>
+                {SHOT_TYPE_GUIDE[type].what}
+              </Text>
+              <Text style={styles.guideItemUsage}>
+                <Text style={styles.guideItemUsageLead}>In game: </Text>
+                {SHOT_TYPE_GUIDE[type].inGame}
+              </Text>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -314,5 +367,58 @@ const styles = StyleSheet.create({
   barLabel: {
     ...Typography.labelCaps,
     color: Colors.muted,
+  },
+
+  // Shot-type explainer dropdown
+  guide: {
+    marginTop: Spacing.md,
+    backgroundColor: Colors.glassBackground,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.glassBorder,
+    overflow: 'hidden',
+  },
+  guideHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.md,
+  },
+  guidePressed: {
+    opacity: 0.6,
+  },
+  guideHeaderText: {
+    ...Typography.bodyMd,
+    flexShrink: 1,
+    color: Colors.primary,
+    fontFamily: 'PlusJakartaSans_700Bold',
+    fontWeight: '700',
+  },
+  guideBody: {
+    paddingHorizontal: Spacing.md,
+    paddingBottom: Spacing.md,
+    gap: Spacing.md,
+  },
+  guideItem: {
+    gap: Spacing.xs,
+  },
+  guideItemTitle: {
+    ...Typography.labelCaps,
+    color: Colors.text,
+  },
+  guideItemText: {
+    ...Typography.bodyMd,
+    color: Colors.onSurfaceVariant,
+  },
+  guideItemUsage: {
+    ...Typography.bodyMd,
+    color: Colors.muted,
+  },
+  guideItemUsageLead: {
+    fontFamily: 'PlusJakartaSans_700Bold',
+    fontWeight: '700',
+    color: Colors.onSurfaceVariant,
   },
 });
