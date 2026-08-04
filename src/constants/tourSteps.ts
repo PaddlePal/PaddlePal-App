@@ -94,7 +94,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     route: '/(tabs)/live',
     targetId: 'live-paddle',
     title: 'See every hit live',
-    body: 'You are recording now. The zone you strike lights up the instant you hit it, so you can check your contact point as you play.',
+    body: 'You are recording now. The zone you strike lights up the instant you hit it, so you can check your contact point as you play. Try pressing the paddle face.',
     // The paddle fills the screen — pin the card low so it never covers the face.
     placement: 'top',
   },
@@ -103,7 +103,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     route: '/(tabs)/dashboard',
     targetId: 'session-card',
     title: 'Finish up',
-    body: 'End Session saves everything you just hit — time played, shot count and a breakdown by zone. Tap it to wrap up.',
+    body: 'End Session saves everything you just hit — time played, shot count and a breakdown by zone. Tap "End Session" it to wrap up.',
     requiresAction: 'session-end',
   },
   {

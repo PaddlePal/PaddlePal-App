@@ -33,11 +33,7 @@ const SCRIM = 'rgba(2, 6, 23, 0.88)';
  * advance themselves when the action lands, so this is an instruction, not a
  * control the user is ever meant to tap.
  */
-const ACTION_PROMPT: Record<TourAction, string> = {
-  connect: 'Connect your paddle to continue',
-  'session-start': 'Start a session to continue',
-  'session-end': 'End the session to continue',
-};
+const ACTION_PROMPT: Partial<Record<TourAction, string>> = {};
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -201,9 +197,11 @@ export function TourOverlay() {
 
         {gate ? (
           // No button: the action itself is what advances the step.
-          <View style={styles.prompt}>
-            <Text style={styles.promptText}>{ACTION_PROMPT[gate]}</Text>
-          </View>
+          ACTION_PROMPT[gate] ? (
+            <View style={styles.prompt}>
+              <Text style={styles.promptText}>{ACTION_PROMPT[gate]}</Text>
+            </View>
+          ) : null
         ) : (
           <Pressable
             style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}

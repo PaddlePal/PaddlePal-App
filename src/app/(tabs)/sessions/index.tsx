@@ -46,38 +46,44 @@ export default function SessionsScreen() {
         </Pressable>
       </View>
 
-      <TourTarget id="history-list" style={styles.listWrap}>
-        {loading ? (
-          <View style={styles.center}>
-            <ActivityIndicator color={Colors.primary} />
-          </View>
-        ) : (
-          <FlatList
-            data={sessions}
-            keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.listContent}
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                onRefresh={refresh}
-                tintColor={Colors.primary}
-                colors={[Colors.primary]}
-              />
-            }
-            ListEmptyComponent={
-              <View style={styles.center}>
-                <Text style={styles.empty}>No sessions recorded yet</Text>
-              </View>
-            }
-            renderItem={({ item }) => (
+      {loading ? (
+        <TourTarget id="history-list" style={styles.center}>
+          <ActivityIndicator color={Colors.primary} />
+        </TourTarget>
+      ) : (
+        <FlatList
+          style={styles.listWrap}
+          data={sessions}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.listContent}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={refresh}
+              tintColor={Colors.primary}
+              colors={[Colors.primary]}
+            />
+          }
+          ListEmptyComponent={
+            <TourTarget id="history-list" style={styles.center}>
+              <Text style={styles.empty}>No sessions recorded yet</Text>
+            </TourTarget>
+          }
+          renderItem={({ item, index }) => {
+            const card = (
               <SessionCard
                 session={item}
                 onPress={() => router.push(`/sessions/${item.id}`)}
               />
-            )}
-          />
-        )}
-      </TourTarget>
+            );
+            return index === 0 ? (
+              <TourTarget id="history-list">{card}</TourTarget>
+            ) : (
+              card
+            );
+          }}
+        />
+      )}
     </SafeAreaView>
   );
 }
