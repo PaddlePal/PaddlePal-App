@@ -1,5 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { SymbolView } from 'expo-symbols';
 
 import { signOut } from '@react-native-firebase/auth';
 import { auth } from '@/lib/firebase';
@@ -60,6 +61,25 @@ export default function SettingsScreen() {
         </View>
       </TourTarget>
 
+      {/* ── Battery notice ──────────────────────────────── */}
+      {/* Static reference copy — describes the paddle's own low-battery
+          signal, not any app or connection state. Deliberately outside the
+          TourTarget above so the onboarding spotlight still frames just the
+          account card. */}
+      <View style={[styles.card, styles.noticeCard]}>
+        <View style={styles.noticeHeader}>
+          {/* `bolt.fill` rather than a `battery.*` glyph on purpose: the
+              percentage battery symbols were renamed in iOS 17 and simply
+              don't render on earlier versions. */}
+          <SymbolView name="bolt.fill" tintColor={Colors.primary} size={18} />
+          <Text style={styles.label}>CHARGING</Text>
+        </View>
+        <Text style={styles.noticeText}>
+          Charge your paddle when the handle buzzes three times in a row,
+          pauses for about two seconds, then repeats that pattern.
+        </Text>
+      </View>
+
       {/* ── Sign Out ────────────────────────────────────── */}
       <Pressable
         style={({ pressed }) => [
@@ -114,6 +134,26 @@ const styles = StyleSheet.create({
   divider: {
     height: 1,
     backgroundColor: Colors.glassBorder,
+  },
+
+  // Battery notice
+  noticeCard: {
+    marginTop: Spacing.md,
+    paddingVertical: Spacing.md,
+    gap: Spacing.sm,
+  },
+  noticeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+  },
+  noticeText: {
+    ...Typography.bodyMd,
+    color: Colors.text,
+  },
+  noticeAside: {
+    ...Typography.bodyMd,
+    color: Colors.muted,
   },
 
   // Sign out
