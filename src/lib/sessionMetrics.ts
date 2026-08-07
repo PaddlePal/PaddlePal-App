@@ -16,7 +16,7 @@ import { classifyShot, SHOT_TYPES } from './shotClassifier';
  * dependency-free and side-effect-free so it's trivial to unit-test and retune.
  */
 
-const ALL_ZONES: readonly ZoneId[] = [1, 2, 3, 4, 5];
+const ALL_ZONES: readonly ZoneId[] = [1, 2, 3, 4];
 
 /**
  * ⚠️ PLACEHOLDER power bucketing — same spirit as the "avg power as one
@@ -24,10 +24,10 @@ const ALL_ZONES: readonly ZoneId[] = [1, 2, 3, 4, 5];
  * the mean FSR payload into quartiles of the 0–1023 range. These cutoffs are a
  * reasonable first guess; retune once real hit data exists.
  *
- * Note: zone-5 payloads are a packed A2/A3 pair (see usePaddleData), not a
- * single force reading, so each payload is clamped to 0–1023 below to keep a
- * stray packed value from skewing the average. Revisit when zone-5 semantics
- * are finalized on hardware.
+ * Every payload is a plain 0–1023 force now that zone 5 and its packed A2/A3
+ * pair are gone. `clampPayload` is kept anyway: the field is 16 bits off the
+ * wire, and it also keeps legacy zone-5 hits (up to 65535, still sitting in
+ * Firestore) from skewing the average if an old session is ever recomputed.
  */
 const POWER_CUTOFFS: readonly { belowOrEqual: number; level: PowerLevel }[] = [
   { belowOrEqual: 500, level: 'low' },
@@ -53,10 +53,11 @@ function computeAvgPower(rawHits: RawHit[]): PowerLevel {
  * Compute the metrics shown on the session detail screen from the raw hit
  * buffer.
  *
- * `zones` and `shotTypes` always contain exactly 5 entries each, zero-filled
- * for any bucket with no hits — the bar charts in sessions/[id].tsx map those
+ * `zones` contains exactly 4 entries and `shotTypes` exactly 5, zero-filled for
+ * any bucket with no hits — the bar charts in sessions/[id].tsx map those
  * arrays directly with no zero-padding of their own, so a short array would
- * silently render fewer bars.
+ * silently render fewer bars. (Sessions recorded before zone 5 was removed have
+ * 5 zone entries and correctly still render 5 bars; they are not rewritten.)
  *
  * `startedAtMs` is the session's client start time, the same value `useSession`
  * subtracts to produce each hit's `offsetMs`. Adding it back gives the hit's
@@ -67,7 +68,7 @@ export function computeSessionMetrics(
   rawHits: RawHit[],
   startedAtMs: number,
 ): SessionMetrics {
-  const counts: Record<ZoneId, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  const counts: Record<ZoneId, number> = { 1: 0, 2: 0, 3: 0, 4: 0 };
   const shotCounts: Record<ShotType, number> = {
     drive: 0,
     drop: 0,

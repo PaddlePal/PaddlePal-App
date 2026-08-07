@@ -7,7 +7,19 @@
  * touching the hooks or screens that consume these types.
  */
 
-export type ZoneId = 1 | 2 | 3 | 4 | 5;
+/**
+ * Firmware FSR zones. Four, one per sensor group — A0/A1/A2/A3.
+ *
+ * ⚠️ Zone 5 (the old "A2 and A3 fired together" composite) was removed from the
+ * firmware on 2026-08-06; zones 3 and 4 now open, close, and report
+ * independently. Sessions recorded before that reflash still contain zone-5
+ * hits in Firestore and a five-entry `metrics.zones` array. Those documents are
+ * read back with a cast and are deliberately NOT rewritten — the hits really
+ * happened — so a legacy `ZoneStat.zone` can hold a 5 this type says is
+ * impossible. Only the zone-bar label path consumes it (see `ZONE_LABELS` in
+ * `sessions/[id].tsx`, which falls back to `Z${zone}`); nothing branches on it.
+ */
+export type ZoneId = 1 | 2 | 3 | 4;
 
 export type PowerLevel = 'low' | 'medium' | 'high' | 'super';
 
@@ -65,7 +77,7 @@ export interface ImuSample {
  */
 export interface RawHit {
   zone: ZoneId;
-  /** Raw FSR value from the BLE packet (0–1023 for zones 1–4). */
+  /** Peak FSR force from the BLE packet, 0–1023. */
   payload: number;
   /** Hit timestamp minus session start timestamp, in ms (client clock). */
   offsetMs: number;
