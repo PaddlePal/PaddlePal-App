@@ -1,4 +1,4 @@
-import { ImuSample, RawHit, ShotType } from '@/types';
+import { ImuSample, RawHit, ShotType, ZoneId } from '@/types';
 
 /**
  * Rule-based shot classification.
@@ -91,20 +91,20 @@ export function computeWindupMs(window: ImuSample[], hitTs: number): number {
 }
 
 /**
- * Contact force on the 0–1023 FSR scale.
+ * Zones whose sensors sit on the outer edges of the paddle face — the A2/A3
+ * pair that used to compose the removed zone 5.
  *
- * Zones 1–4 store it directly. **Zone 5 does not** — its payload is a packed
- * A2/A3 pair (upper byte / lower byte, each scaled down by 4 in the firmware),
- * so reading it as a force gives a value up to 65535. Left raw it would push
- * every zone-5 hit past `FORCE_HIGH`, which matters here because zone 5 is
- * exactly where Overhead lives. Unpacked to the harder of the two contacts.
+ * ⚠️ This is Overhead's contact-point gate, and it is a **wider net than what
+ * it replaced**. Zone 5 meant "A2 and A3 fired together"; requiring both
+ * sensors made it a genuinely rare, distinctive signature, which is why
+ * Overhead sits first in the cascade. With zones 3 and 4 independent that
+ * conjunction no longer exists, so the gate is now "either edge sensor" — the
+ * same physical region, a looser condition. Expect Overhead to over-fire until
+ * `GYRO_HIGH_DPS`/`WINDUP_LARGE_MS` are tuned; if it still over-fires after
+ * tuning, the honest fix is dropping Overhead rather than stretching these two
+ * thresholds to compensate for a gate that lost its selectivity.
  */
-function hitForce(hit: RawHit): number {
-  if (hit.zone !== 5) return hit.payload;
-  const a2 = (hit.payload >> 8) << 2; // restores 0–255 to the 0–1020 range
-  const a3 = (hit.payload & 0xff) << 2;
-  return Math.max(a2, a3);
-}
+const OVERHEAD_ZONES: readonly ZoneId[] = [3, 4];
 
 /**
  * Classify one hit.
@@ -117,10 +117,14 @@ function hitForce(hit: RawHit): number {
  * by up to one BLE tick, biasing every windup measurement downward.)
  *
  * Cascade order is Overhead → Drive → Dink → Drop → Rally: most distinctive
- * signature first (Overhead's zone-5 contact plus a big windup is the hardest
- * to fake), most ambiguous last (Drop is the "everything in between" shot, so
- * sitting right before the Rally fallback means it only catches what survived
- * the sharper checks above).
+ * signature first (an edge contact plus a big windup is the hardest to fake),
+ * most ambiguous last (Drop is the "everything in between" shot, so sitting
+ * right before the Rally fallback means it only catches what survived the
+ * sharper checks above).
+ *
+ * Overhead and Drive are now mutually exclusive by zone — Overhead takes 3/4,
+ * Drive takes 1 — so their order relative to each other no longer decides
+ * anything. That was not true when Overhead gated on zone 5.
  */
 export function classifyShot(hit: RawHit, hitTs: number): ShotType {
   const window = hit.imuWindow;
@@ -130,9 +134,13 @@ export function classifyShot(hit: RawHit, hitTs: number): ShotType {
 
   const peak = computePeakGyroMag(window);
   const windup = computeWindupMs(window, hitTs);
-  const force = hitForce(hit);
+  const force = hit.payload;
 
-  if (hit.zone === 5 && peak >= GYRO_HIGH_DPS && windup >= WINDUP_LARGE_MS) {
+  if (
+    OVERHEAD_ZONES.includes(hit.zone) &&
+    peak >= GYRO_HIGH_DPS &&
+    windup >= WINDUP_LARGE_MS
+  ) {
     return 'overhead';
   }
   if (hit.zone == 1 && peak >= GYRO_HIGH_DPS && force >= FORCE_HIGH) {

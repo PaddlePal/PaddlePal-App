@@ -12,16 +12,12 @@ import { useBluetooth } from '@/hooks/useBluetooth';
 const PADDLE_SERVICE_UUID = '9590ad2d-fd81-4688-9d3b-65ac36caca3a';
 const FSR_CHAR_UUID = '9590ad2f-fd81-4688-9d3b-65ac36caca3a';
 
-export type ZoneId = 1 | 2 | 3 | 4 | 5;
+export type ZoneId = 1 | 2 | 3 | 4;
 
 export interface PaddleHit {
-  /** Zone 1–5 (upper 16 bits of the FIFO word). */
+  /** Zone 1–4 (upper 16 bits of the FIFO word). */
   zone: ZoneId;
-  /**
-   * Raw lower-16-bit payload. Zones 1–4: FSR force (0–1023). Zone 5: a packed
-   * A2/A3 pair (upper byte / lower byte, each ×4 to restore 0–1020) — the demo
-   * only needs the zone to light up, so this is left raw here.
-   */
+  /** Lower-16-bit payload: peak FSR force, 0–1023, for every zone. */
   payload: number;
   /**
    * Monotonic receipt timestamp. The UI keys its flash animation on this so
@@ -32,7 +28,7 @@ export interface PaddleHit {
 
 export type ZoneCounts = Record<ZoneId, number>;
 
-const EMPTY_COUNTS: ZoneCounts = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+const EMPTY_COUNTS: ZoneCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
 
 interface PaddleData {
   /** Most recent decoded hit, or null before the first one. */
@@ -52,8 +48,15 @@ interface UsePaddleDataOptions {
   onHit?: (hit: PaddleHit) => void;
 }
 
+/**
+ * Zone 5 is deliberately out of range: the firmware stopped emitting it on
+ * 2026-08-06. A paddle still running an older build will emit zone-5 packets,
+ * and `decodeHit` now drops them as malformed rather than silently recording a
+ * zone the rest of the app no longer models. Symptom of a stale flash: hits
+ * near the paddle edges vanish instead of appearing on the Live face.
+ */
 function isZoneId(zone: number): zone is ZoneId {
-  return zone >= 1 && zone <= 5;
+  return zone >= 1 && zone <= 4;
 }
 
 /**
