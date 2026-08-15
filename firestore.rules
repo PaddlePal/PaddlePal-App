@@ -1,0 +1,32 @@
+rules_version = '2';
+
+// PaddlePal Connect — Firestore security rules.
+//
+// First real per-user gameplay data (sessions) is written by this pass, so
+// these rules are required, not optional (see memory-bank/PLAN-session-fsr-backend.md
+// T1 and the "No Firestore rules today" risk). Every rule requires an
+// authenticated caller and scopes access to data the caller owns.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Users ────────────────────────────────────────────────────────────
+    // A signed-in user may read and write only their own profile document.
+    // (Previously unruled — same ownership gap, same fix as sessions.)
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // ── Sessions ─────────────────────────────────────────────────────────
+    // Top-level collection; ownership is carried by a `userId` field rather
+    // than a per-user subcollection (Track C1 decision).
+    match /sessions/{sessionId} {
+      // Create only a document that stamps the caller's own uid as `userId`.
+      allow create: if request.auth != null
+                    && request.resource.data.userId == request.auth.uid;
+
+      // Read / update / delete only sessions the caller owns.
+      allow read, update, delete: if request.auth != null
+                    && resource.data.userId == request.auth.uid;
+    }
+  }
+}

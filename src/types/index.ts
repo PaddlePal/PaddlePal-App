@@ -1,5 +1,7 @@
 import { Timestamp } from '@react-native-firebase/firestore';
 
+export * from './session';
+
 /**
  * Core user profile stored in Firestore `users/{uid}`.
  */

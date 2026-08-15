@@ -7,35 +7,55 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 
-import { signOut } from '@react-native-firebase/auth';
 import { doc, setDoc } from '@react-native-firebase/firestore';
-import { auth, firestore } from '@/lib/firebase';
+import { firestore } from '@/lib/firebase';
 import { useAuth } from '@/hooks/useAuth';
+import { useBluetooth } from '@/hooks/useBluetooth';
+import {
+  TOUR_AUTO_CONNECT_SOURCE,
+  TOUR_PARAM_VALUE,
+} from '@/constants/tourSteps';
 import { Colors } from '@/constants/colors';
 import { Typography } from '@/constants/typography';
 import { Spacing, Radius } from '@/constants/spacing';
 
 export default function WelcomeScreen() {
   const { user } = useAuth();
+  const { setAutoConnectEnabled } = useBluetooth();
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
 
   /**
-   * Dev-only: mark onboarded → true, then sign out to validate
-   * the Auth Gate bounces the user back to sign-in.
+   * Complete onboarding (`onboarded` → true) and hand straight over to the
+   * in-context tour.
+   *
+   * Navigating explicitly rather than leaning on the root Auth Gate's reactive
+   * redirect is what carries the `tour` param — which is the entire "plays
+   * once" mechanism: a normal relaunch lands on the dashboard without it. The
+   * Auth Gate's redirect is untouched and still covers every other transition.
    */
-  const handleSkip = async () => {
+  const handleGetStarted = async () => {
     if (!user) return;
 
     setLoading(true);
+    // Claim the tour's auto-connect hold BEFORE the flag flips. The Auth Gate
+    // releases its own hold the instant `onboarded` becomes true, and the tour
+    // can't claim one until the tabs tree mounts — without this the loop could
+    // arm in that gap and connect the paddle before the Connect Paddle step.
+    setAutoConnectEnabled(false, TOUR_AUTO_CONNECT_SOURCE);
     try {
       const userRef = doc(firestore, 'users', user.uid);
       await setDoc(userRef, { onboarded: true }, { merge: true });
-
-      await signOut(auth);
-    } catch {
-      // Auth Gate will handle navigation
-    } finally {
+      router.replace({
+        pathname: '/(tabs)/dashboard',
+        params: { tour: TOUR_PARAM_VALUE },
+      });
+    } catch (err) {
+      console.error('[WelcomeScreen] Error completing onboarding:', err);
+      // Onboarding didn't complete — no tour is coming, so give the radio back.
+      setAutoConnectEnabled(true, TOUR_AUTO_CONNECT_SOURCE);
       setLoading(false);
     }
   };
@@ -50,16 +70,16 @@ export default function WelcomeScreen() {
         <Text style={styles.brand}>PADDLEPAL</Text>
         <Text style={styles.title}>Welcome to{'\n'}PaddlePal Connect</Text>
         <Text style={styles.body}>
-          Your smart paddle companion is almost ready. We'll walk you through
-          connecting your paddle and customizing your experience.
+          Your smart paddle companion is ready. Let's get you set up and show
+          you around.
         </Text>
 
-        {/* ── Placeholder card ─────────────────────────── */}
+        {/* ── What happens next ────────────────────────── */}
         <View style={styles.card}>
-          <Text style={styles.cardLabel}>ONBOARDING</Text>
+          <Text style={styles.cardLabel}>QUICK TOUR</Text>
           <Text style={styles.cardBody}>
-            Full onboarding flow coming soon — paddle pairing, sensor
-            calibration, and profile setup.
+            A quick lap of the app: connecting your paddle, recording a real
+            session, watching your hits land live, and where your stats live.
           </Text>
         </View>
       </View>
@@ -68,17 +88,17 @@ export default function WelcomeScreen() {
       <View style={styles.actions}>
         <Pressable
           style={({ pressed }) => [
-            styles.skipButton,
+            styles.getStartedButton,
             pressed && styles.buttonPressed,
             loading && styles.buttonDisabled,
           ]}
-          onPress={handleSkip}
+          onPress={handleGetStarted}
           disabled={loading}
         >
           {loading ? (
             <ActivityIndicator color={Colors.onPrimary} />
           ) : (
-            <Text style={styles.skipButtonText}>Skip for now (Dev)</Text>
+            <Text style={styles.getStartedButtonText}>Get Started</Text>
           )}
         </Pressable>
       </View>
@@ -147,7 +167,7 @@ const styles = StyleSheet.create({
   actions: {
     paddingBottom: Spacing.xl,
   },
-  skipButton: {
+  getStartedButton: {
     backgroundColor: Colors.primary,
     borderRadius: Radius.lg,
     paddingVertical: 16,
@@ -160,7 +180,7 @@ const styles = StyleSheet.create({
   buttonDisabled: {
     opacity: 0.6,
   },
-  skipButtonText: {
+  getStartedButtonText: {
     ...Typography.bodyLg,
     color: Colors.onPrimary,
     fontFamily: 'PlusJakartaSans_700Bold',

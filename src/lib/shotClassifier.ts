@@ -1,0 +1,156 @@
+import { ImuSample, RawHit, ShotType, ZoneId } from '@/types';
+
+/**
+ * Rule-based shot classification.
+ *
+ * Runs on-device when a session ends (see `computeSessionMetrics`). Pure,
+ * dependency-free and side-effect-free — same discipline as `sessionMetrics.ts`
+ * and for the same reason: trivial to unit-test and to retune.
+ *
+ * Deliberately a decision cascade, not a trained model and not independent
+ * per-class rules. The cascade is what makes it **tie-free by construction** —
+ * evaluation stops at the first match, so there is structurally nothing for two
+ * classes to disagree about. Order only decides which class an ambiguous
+ * signature falls into, never whether two can both fire.
+ *
+ * Four features, all derived from data already on every `RawHit`: peak gyro
+ * magnitude (swing speed), force (power), windup duration, and zone (contact
+ * point). Paddle face / shot angle is deliberately out of scope — the LSM6DSOX
+ * has no magnetometer, so absolute orientation isn't measurable, and
+ * gyro-integrated relative rotation is real work for the least-confident
+ * feature.
+ */
+
+/**
+ * ⚠️ PLACEHOLDER thresholds — starting guesses, not measurements. The whole
+ * point of keeping them here as named constants is that retuning against real
+ * recorded swings is a one-line edit per value. Expect to change all of them.
+ */
+const GYRO_HIGH_DPS = 300;
+const GYRO_LOW_DPS = 150;
+const FORCE_HIGH = 800; // raw FSR scale, 0–1023
+const FORCE_LOW = 799;
+const WINDUP_LARGE_MS = 300;
+const WINDUP_SHORT_MS = 200;
+/**
+ * A separate, much lower bar than `GYRO_LOW_DPS`: not "was this a soft swing"
+ * but "is the paddle moving at all". Used only to find where a windup starts.
+ */
+const ACTIVITY_FLOOR_DPS = 40;
+
+/** Fixed display order — mirrored by `SessionMetrics.shotTypes` and the UI. */
+export const SHOT_TYPES: readonly ShotType[] = [
+  'drive',
+  'drop',
+  'dink',
+  'overhead',
+  'rally',
+];
+
+/** Total angular rate, in deg/s, regardless of axis. */
+function gyroMagnitude(sample: ImuSample): number {
+  return Math.sqrt(sample.gx ** 2 + sample.gy ** 2 + sample.gz ** 2);
+}
+
+/**
+ * Fastest the paddle was rotating anywhere in the window — the "swing speed"
+ * feature. 0 for an empty window.
+ */
+export function computePeakGyroMag(window: ImuSample[]): number {
+  let peak = 0;
+  for (const sample of window) {
+    const mag = gyroMagnitude(sample);
+    if (mag > peak) peak = mag;
+  }
+  return peak;
+}
+
+/**
+ * How long the paddle had been swinging before contact, in ms.
+ *
+ * `window` is oldest-first (`useImuBuffer.getWindow`'s contract). Walks
+ * newest → oldest for the last sample where the paddle was still quiet; the
+ * windup is everything after it.
+ */
+export function computeWindupMs(window: ImuSample[], hitTs: number): number {
+  if (window.length === 0) return 0;
+
+  for (let i = window.length - 1; i >= 0; i--) {
+    if (gyroMagnitude(window[i]) < ACTIVITY_FLOOR_DPS) {
+      // When the quiet sample IS the newest one, the paddle was still at
+      // contact time: no detectable windup at all.
+      if (i === window.length - 1) return 0;
+      return Math.max(hitTs - window[i].ts, 0);
+    }
+  }
+
+  // Never dropped below the floor anywhere in the window — the swing began
+  // before the window opens, so the most that can be said is "at least this
+  // long". A longer IMU_WINDOW_MS is the only way to see further back.
+  return Math.max(hitTs - window[0].ts, 0);
+}
+
+/**
+ * Zones whose sensors sit on the outer edges of the paddle face — the A2/A3
+ * pair that used to compose the removed zone 5.
+ *
+ * ⚠️ This is Overhead's contact-point gate, and it is a **wider net than what
+ * it replaced**. Zone 5 meant "A2 and A3 fired together"; requiring both
+ * sensors made it a genuinely rare, distinctive signature, which is why
+ * Overhead sits first in the cascade. With zones 3 and 4 independent that
+ * conjunction no longer exists, so the gate is now "either edge sensor" — the
+ * same physical region, a looser condition. Expect Overhead to over-fire until
+ * `GYRO_HIGH_DPS`/`WINDUP_LARGE_MS` are tuned; if it still over-fires after
+ * tuning, the honest fix is dropping Overhead rather than stretching these two
+ * thresholds to compensate for a gate that lost its selectivity.
+ */
+const OVERHEAD_ZONES: readonly ZoneId[] = [3, 4];
+
+/**
+ * Classify one hit.
+ *
+ * `hitTs` is the hit's **absolute** receipt timestamp — the same clock the
+ * `imuWindow` samples are keyed on. `RawHit` only stores `offsetMs` (relative
+ * to session start), so callers reconstruct it as `startedAtMs + offsetMs`,
+ * which is exact: `useSession` derives `offsetMs` from that same start value.
+ * (Using the window's last sample's `ts` instead would be systematically short
+ * by up to one BLE tick, biasing every windup measurement downward.)
+ *
+ * Cascade order is Overhead → Drive → Dink → Drop → Rally: most distinctive
+ * signature first (an edge contact plus a big windup is the hardest to fake),
+ * most ambiguous last (Drop is the "everything in between" shot, so sitting
+ * right before the Rally fallback means it only catches what survived the
+ * sharper checks above).
+ *
+ * Overhead and Drive are now mutually exclusive by zone — Overhead takes 3/4,
+ * Drive takes 1 — so their order relative to each other no longer decides
+ * anything. That was not true when Overhead gated on zone 5.
+ */
+export function classifyShot(hit: RawHit, hitTs: number): ShotType {
+  const window = hit.imuWindow;
+  // No motion data → nothing to judge by. Happens for hits in the first moments
+  // of a session, or during a paddle reconnect.
+  if (!window || window.length === 0) return 'rally';
+
+  const peak = computePeakGyroMag(window);
+  const windup = computeWindupMs(window, hitTs);
+  const force = hit.payload;
+
+  if (
+    OVERHEAD_ZONES.includes(hit.zone) &&
+    peak >= GYRO_HIGH_DPS &&
+    windup >= WINDUP_LARGE_MS
+  ) {
+    return 'overhead';
+  }
+  if (hit.zone == 1 && peak >= GYRO_HIGH_DPS && force >= FORCE_HIGH) {
+    return 'drive';
+  }
+  if (peak <= GYRO_LOW_DPS && force <= FORCE_LOW && windup <= WINDUP_SHORT_MS) {
+    return 'dink';
+  }
+  if (peak < GYRO_HIGH_DPS && force < FORCE_LOW) {
+    return 'drop';
+  }
+  return 'rally';
+}

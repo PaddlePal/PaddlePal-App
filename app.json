@@ -41,13 +41,36 @@
             "useFrameworks": "static"
           }
         }
+      ],
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": [
+            "central"
+          ],
+          "bluetoothAlwaysPermission": "Allow PaddlePal Connect to connect to your smart pickleball paddle."
+        }
       ]
     ],
     "experiments": {
       "typedRoutes": true
     },
     "android": {
-      "package": "com.paddlepal.connect"
+      "package": "com.paddlepal.connect",
+      "permissions": [
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT"
+      ]
+    },
+    "extra": {
+      "router": {
+        "root": "./src/app"
+      },
+      "eas": {
+        "projectId": "d47f2ec4-1db4-4b95-9808-bfac60c66aa8"
+      }
     }
   }
 }
